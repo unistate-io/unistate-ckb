@@ -1,0 +1,22 @@
+version: "3"
+
+services:
+  db:
+    image: postgres
+    environment:
+      POSTGRES_DB: unistate_dev
+      POSTGRES_USER: unistate_dev
+      POSTGRES_PASSWORD: unistate_dev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  psql:
+    image: postgres
+    depends_on:
+      - db
+    command: ["psql", "-h", "db", "-U", "unistate_dev", "unistate_dev"]
+
+volumes:
+  pgdata:
