@@ -83,10 +83,27 @@ pub async fn upsert_rgbpp_unlock(
                 .do_nothing()
                 .to_owned(),
         )
-        .exec_with_returning(db)
+        .do_nothing()
+        .exec(db)
         .await?;
 
-    Ok(res)
+    match res {
+        sea_orm::TryInsertResult::Empty => Err(anyhow!("Try instert rgbpp lock empty.")),
+        sea_orm::TryInsertResult::Conflicted => {
+            let model = entity::prelude::RgbppUnlocks::find_by_id(rgbpp_lock.lock_id.clone())
+                .one(db)
+                .await?
+                .unwrap();
+            Ok(model)
+        }
+        sea_orm::TryInsertResult::Inserted(res) => {
+            let model = entity::prelude::RgbppUnlocks::find_by_id(res.last_insert_id)
+                .one(db)
+                .await?
+                .unwrap();
+            Ok(model)
+        }
+    }
 }
 
 pub async fn upsert_address(
@@ -96,9 +113,9 @@ pub async fn upsert_address(
     println!("upsert_address");
 
     let action::AddressUnion::Script(address) = address;
-
+    let address_id = address.as_bytes();
     let address = entity::addresses::ActiveModel {
-        address_id: Set(address.as_bytes().to_vec()),
+        address_id: Set(address_id.to_vec()),
         script_code_hash: Set(address.code_hash().raw_data().to_vec()),
         script_hash_type: Set(Into::<u8>::into(address.hash_type()) as i16),
         script_args: Set(Some(address.args().raw_data().to_vec())),
@@ -110,10 +127,27 @@ pub async fn upsert_address(
                 .do_nothing()
                 .to_owned(),
         )
-        .exec_with_returning(db)
+        .do_nothing()
+        .exec(db)
         .await?;
 
-    Ok(res)
+    match res {
+        sea_orm::TryInsertResult::Empty => Err(anyhow!("Try instert rgbpp lock empty.")),
+        sea_orm::TryInsertResult::Conflicted => {
+            let model = entity::prelude::Addresses::find_by_id(address_id.to_vec())
+                .one(db)
+                .await?
+                .unwrap();
+            Ok(model)
+        }
+        sea_orm::TryInsertResult::Inserted(res) => {
+            let model = entity::prelude::Addresses::find_by_id(res.last_insert_id)
+                .one(db)
+                .await?
+                .unwrap();
+            Ok(model)
+        }
+    }
 }
 
 pub async fn burn_spore(
@@ -173,8 +207,10 @@ pub async fn mint_spore(
         .ok_or(anyhow!("invalid timestamp: {}", timestamp))?
         .naive_utc();
 
+    let spore_id = mint.spore_id().raw_data();
+
     let spore = entity::spores::ActiveModel {
-        spore_id: Set(mint.spore_id().raw_data().to_vec()),
+        spore_id: Set(spore_id.to_vec()),
         content_type: Set(spore_data.content_type().raw_data().to_vec()),
         content: Set(spore_data.content().raw_data().to_vec()),
         cluster_id: Set(spore_data
@@ -188,14 +224,33 @@ pub async fn mint_spore(
         is_burned: Set(false),
     };
 
-    let spore = entity::prelude::Spores::insert(spore)
+    let spore_res = entity::prelude::Spores::insert(spore)
         .on_conflict(
             sea_query::OnConflict::column(entity::spores::Column::SporeId)
                 .do_nothing()
                 .to_owned(),
         )
-        .exec_with_returning(db)
+        .do_nothing()
+        .exec(db)
         .await?;
+
+    let spore = match spore_res {
+        sea_orm::TryInsertResult::Conflicted => {
+            let model = entity::prelude::Spores::find_by_id(spore_id.to_vec())
+                .one(db)
+                .await?
+                .unwrap();
+            model
+        }
+        sea_orm::TryInsertResult::Inserted(res) => {
+            let model = entity::prelude::Spores::find_by_id(res.last_insert_id)
+                .one(db)
+                .await?
+                .unwrap();
+            model
+        }
+        sea_orm::TryInsertResult::Empty => unreachable!(),
+    };
 
     let action = entity::spore_actions::ActiveModel {
         action_id: NotSet,
@@ -271,9 +326,9 @@ pub async fn mint_cluster(
     let timestamp = chrono::DateTime::from_timestamp_millis(timestamp as i64)
         .ok_or(anyhow!("invalid timestamp: {}", timestamp))?
         .naive_utc();
-
+    let cluster_id = mint.cluster_id().raw_data();
     let cluster = entity::clusters::ActiveModel {
-        cluster_id: Set(mint.cluster_id().raw_data().to_vec()),
+        cluster_id: Set(cluster_id.to_vec()),
         owner_address_id: Set(owner.address_id.clone()),
         data_hash: Set(mint.data_hash().raw_data().to_vec()),
         name: Set(cluster_data.name().raw_data().to_vec()),
@@ -286,14 +341,33 @@ pub async fn mint_cluster(
         updated_at: Set(timestamp),
     };
 
-    let cluster = entity::prelude::Clusters::insert(cluster)
+    let cluster_res = entity::prelude::Clusters::insert(cluster)
         .on_conflict(
             sea_query::OnConflict::column(entity::clusters::Column::ClusterId)
                 .do_nothing()
                 .to_owned(),
         )
-        .exec_with_returning(db)
+        .do_nothing()
+        .exec(db)
         .await?;
+
+    let cluster = match cluster_res {
+        sea_orm::TryInsertResult::Conflicted => {
+            let model = entity::prelude::Clusters::find_by_id(cluster_id.to_vec())
+                .one(db)
+                .await?
+                .unwrap();
+            model
+        }
+        sea_orm::TryInsertResult::Inserted(res) => {
+            let model = entity::prelude::Clusters::find_by_id(res.last_insert_id)
+                .one(db)
+                .await?
+                .unwrap();
+            model
+        }
+        sea_orm::TryInsertResult::Empty => unreachable!(),
+    };
 
     let action = entity::cluster_actions::ActiveModel {
         action_id: NotSet,
