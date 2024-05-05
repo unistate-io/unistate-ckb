@@ -23,7 +23,7 @@ mod schemas;
 mod spore;
 mod xudt;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 10)]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     let filter = FilterFn::new(|metadata| {
         // Only enable spans or events with the target "interesting_things"
@@ -57,9 +57,9 @@ async fn main() -> anyhow::Result<()> {
     // let mut height = 12801007u64;
     // let mut height = 12801313u64;
     // let mut height = 12800136u64;
-    // let mut height = 12000082u64.max(block_height_value);
+    let mut height = 12000082u64.max(block_height_value);
     // let mut height = 12429082u64;
-    let mut height = 12800082u64.max(block_height_value);
+    // let mut height = 12800082u64.max(block_height_value);
 
     let mut target = client.get_tip_block_number().await?.value();
     let max_batch_size = 1000;
@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
         if batch_size == 0 {
+            info!("sleeping...");
             tokio::time::sleep(Duration::from_secs(6)).await;
         }
     }

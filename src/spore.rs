@@ -1,7 +1,6 @@
 use anyhow::Ok;
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
-use jsonrpsee::http_client::HttpClient;
 use molecule::bytes::Buf;
 use molecule::prelude::{Entity, Reader as _};
 use rayon::iter::IntoParallelRefIterator;
@@ -10,7 +9,6 @@ use sea_orm::DbConn;
 use sea_orm::{prelude::ActiveModelTrait as _, ActiveValue::NotSet, EntityTrait, Set};
 use tracing::debug;
 
-use crate::fetcher::Fetcher;
 use crate::schemas::spore_v1;
 use crate::schemas::spore_v2;
 use crate::schemas::top_level::WitnessLayoutReader;
