@@ -49,7 +49,7 @@ pub async fn index_rgbpp_lock(
         .collect::<Vec<_>>();
 
     for unlock in rgbpp_unlocks {
-        debug!("unlock: {:?}", unlock);
+        debug!("unlock: {}", unlock);
 
         upsert_rgbpp_unlock(db, &unlock, tx.hash.clone()).await?;
     }
@@ -113,7 +113,7 @@ pub async fn index_rgbpp_lock(
     let locks = [inputs, outputs].concat();
 
     for lock in locks {
-        debug!("lock: {:?}", lock);
+        debug!("lock: {}", lock);
 
         upsert_rgbpp_lock(db, &lock, tx.hash.clone()).await?;
     }
