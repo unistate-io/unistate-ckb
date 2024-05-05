@@ -1,62 +1,70 @@
--- 创建 addresses 表
+-- Create enumeration type for spore action types
+CREATE TYPE spore_action_type AS ENUM (
+    'MintSpore',
+    'TransferSpore',
+    'BurnSpore',
+    'MintCluster',
+    'TransferCluster',
+    'MintProxy',
+    'TransferProxy',
+    'BurnProxy',
+    'MintAgent',
+    'TransferAgent',
+    'BurnAgent'
+);
+
+-- Create addresses table
 CREATE TABLE addresses (
-    address_id BYTEA PRIMARY KEY,
+    id VARCHAR PRIMARY KEY,
     script_code_hash BYTEA NOT NULL,
     script_hash_type SMALLINT NOT NULL,
-    script_args BYTEA
+    script_args BYTEA NOT NULL
 );
-CREATE INDEX ON addresses (script_code_hash, script_hash_type);
 
--- 创建 spores 表
-CREATE TABLE spores (
-    spore_id BYTEA PRIMARY KEY,
-    owner_address_id BYTEA NOT NULL REFERENCES addresses(address_id),
-    data_hash BYTEA NOT NULL,
-    content_type BYTEA NOT NULL,
-    content BYTEA NOT NULL,
-    cluster_id BYTEA,
-    is_burned BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX ON spores (owner_address_id);
-CREATE INDEX ON spores (cluster_id);
-
--- 创建 clusters 表
-CREATE TABLE clusters (
-    cluster_id BYTEA PRIMARY KEY,
-    owner_address_id BYTEA NOT NULL REFERENCES addresses(address_id),
-    data_hash BYTEA NOT NULL,
-    name BYTEA NOT NULL,
-    description BYTEA NOT NULL,
-    mutant_id BYTEA,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX ON clusters (owner_address_id);
-
--- 创建 spore_actions 表
+-- Create spore_actions table
 CREATE TABLE spore_actions (
-    action_id SERIAL PRIMARY KEY,
-    action_type SMALLINT NOT NULL,
-    spore_id BYTEA NOT NULL REFERENCES spores(spore_id),
-    from_address_id BYTEA REFERENCES addresses(address_id),
-    to_address_id BYTEA REFERENCES addresses(address_id),
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id SERIAL PRIMARY KEY,
+    tx BYTEA NOT NULL,
+    action_type spore_action_type NOT NULL,
+    spore_id BYTEA,
+    cluster_id BYTEA,
+    proxy_id BYTEA,
+    from_address_id VARCHAR,
+    to_address_id VARCHAR,
+    data_hash BYTEA,
+    content_type BYTEA,
+    content BYTEA,
+    cluster_name BYTEA,
+    cluster_description BYTEA,
+    mutant_id BYTEA,
+    created_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (from_address_id) REFERENCES addresses(id),
+    FOREIGN KEY (to_address_id) REFERENCES addresses(id)
 );
-CREATE INDEX ON spore_actions (spore_id);
-CREATE INDEX ON spore_actions (from_address_id);
-CREATE INDEX ON spore_actions (to_address_id);
 
--- 创建 cluster_actions 表
-CREATE TABLE cluster_actions (
-    action_id SERIAL PRIMARY KEY,
-    action_type SMALLINT NOT NULL,
-    cluster_id BYTEA NOT NULL REFERENCES clusters(cluster_id),
-    from_address_id BYTEA REFERENCES addresses(address_id),
-    to_address_id BYTEA REFERENCES addresses(address_id),
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE clusters (
+    id BYTEA PRIMARY KEY,
+    cluster_name BYTEA,
+    content BYTEA,
+    cluster_description BYTEA,
+    mutant_id BYTEA,
+    owner_address VARCHAR,
+    is_burned BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (owner_address) REFERENCES addresses(id)
 );
-CREATE INDEX ON cluster_actions (cluster_id);
-CREATE INDEX ON cluster_actions (from_address_id);
-CREATE INDEX ON cluster_actions (to_address_id);
+
+CREATE TABLE spores (
+    id BYTEA PRIMARY KEY,
+    content_type BYTEA,
+    content BYTEA,
+    cluster_id BYTEA,
+    owner_address VARCHAR,
+    is_burned BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (owner_address) REFERENCES addresses(id),
+    FOREIGN KEY (cluster_id) REFERENCES clusters(id)
+);
+

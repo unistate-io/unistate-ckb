@@ -10,17 +10,17 @@ pub struct Model {
         auto_increment = false,
         column_type = "Binary(BlobSize::Blob(None))"
     )]
-    pub cluster_id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub owner_address_id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub data_hash: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub name: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub description: Vec<u8>,
+    pub id: Vec<u8>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub cluster_name: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub content: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub cluster_description: Option<Vec<u8>>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
     pub mutant_id: Option<Vec<u8>>,
+    pub owner_address: Option<String>,
+    pub is_burned: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -29,14 +29,14 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(
         belongs_to = "super::addresses::Entity",
-        from = "Column::OwnerAddressId",
-        to = "super::addresses::Column::AddressId",
+        from = "Column::OwnerAddress",
+        to = "super::addresses::Column::Id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
     Addresses,
-    #[sea_orm(has_many = "super::cluster_actions::Entity")]
-    ClusterActions,
+    #[sea_orm(has_many = "super::spores::Entity")]
+    Spores,
 }
 
 impl Related<super::addresses::Entity> for Entity {
@@ -45,9 +45,9 @@ impl Related<super::addresses::Entity> for Entity {
     }
 }
 
-impl Related<super::cluster_actions::Entity> for Entity {
+impl Related<super::spores::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::ClusterActions.def()
+        Relation::Spores.def()
     }
 }
 

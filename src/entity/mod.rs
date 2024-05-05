@@ -3,9 +3,10 @@
 pub mod prelude;
 
 pub mod addresses;
-pub mod cluster_actions;
+pub mod block_height;
 pub mod clusters;
 pub mod rgbpp_locks;
 pub mod rgbpp_unlocks;
+pub mod sea_orm_active_enums;
 pub mod spore_actions;
 pub mod spores;

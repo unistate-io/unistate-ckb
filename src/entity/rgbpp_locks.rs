@@ -11,29 +11,14 @@ pub struct Model {
         column_type = "Binary(BlobSize::Blob(None))"
     )]
     pub lock_id: Vec<u8>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
+    pub tx: Vec<u8>,
     pub out_index: i32,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
     pub btc_txid: Vec<u8>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::cluster_actions::Entity")]
-    ClusterActions,
-    #[sea_orm(has_many = "super::spore_actions::Entity")]
-    SporeActions,
-}
-
-impl Related<super::cluster_actions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ClusterActions.def()
-    }
-}
-
-impl Related<super::spore_actions::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::SporeActions.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
