@@ -10,17 +10,14 @@ pub struct Model {
         auto_increment = false,
         column_type = "Binary(BlobSize::Blob(None))"
     )]
-    pub spore_id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub owner_address_id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub data_hash: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub content_type: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))")]
-    pub content: Vec<u8>,
+    pub id: Vec<u8>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub content_type: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub content: Option<Vec<u8>>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
     pub cluster_id: Option<Vec<u8>>,
+    pub owner_address: Option<String>,
     pub is_burned: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
@@ -30,14 +27,20 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(
         belongs_to = "super::addresses::Entity",
-        from = "Column::OwnerAddressId",
-        to = "super::addresses::Column::AddressId",
+        from = "Column::OwnerAddress",
+        to = "super::addresses::Column::Id",
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
     Addresses,
-    #[sea_orm(has_many = "super::spore_actions::Entity")]
-    SporeActions,
+    #[sea_orm(
+        belongs_to = "super::clusters::Entity",
+        from = "Column::ClusterId",
+        to = "super::clusters::Column::Id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    Clusters,
 }
 
 impl Related<super::addresses::Entity> for Entity {
@@ -46,9 +49,9 @@ impl Related<super::addresses::Entity> for Entity {
     }
 }
 
-impl Related<super::spore_actions::Entity> for Entity {
+impl Related<super::clusters::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::SporeActions.def()
+        Relation::Clusters.def()
     }
 }
 
