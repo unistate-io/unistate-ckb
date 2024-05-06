@@ -143,11 +143,13 @@ async fn upsert_rgbpp_lock(
         .is_some();
 
     if !lock_exists {
+        let mut txid = rgbpp_lock.btc_txid().as_bytes().to_vec();
+        txid.reverse();
         // Insert rgbpp lock
         rgbpp_locks::ActiveModel {
             lock_id: Set(lock_id),
             out_index: Set(rgbpp_lock.out_index().raw_data().get_u32() as i32),
-            btc_txid: Set(rgbpp_lock.btc_txid().as_bytes().to_vec()),
+            btc_txid: Set(txid),
             tx: Set(tx.0.to_vec()),
         }
         .insert(db)

@@ -209,7 +209,7 @@ define_info_mod! {
 
 define_info_mod! {
     mainnet_info,
-    12617180,
+    12026092,
     // Secp256k1LockDep
     "71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c",
     // RgbppLockDep
