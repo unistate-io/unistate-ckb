@@ -4032,6 +4032,7 @@ dependencies = [
  "ckb-jsonrpc-types",
  "ckb-sdk",
  "ckb-types",
+ "dotenvy",
  "hex",
  "hex-literal",
  "jsonrpsee",
