@@ -1,4 +1,5 @@
 use core::time::Duration;
+use std::env;
 
 use ckb_jsonrpc_types::BlockNumber;
 use ckb_sdk::NetworkType;
@@ -25,6 +26,8 @@ mod xudt;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv()?;
+
     let filter = FilterFn::new(|metadata| {
         // Only enable spans or events with the target "interesting_things"
         metadata
@@ -41,8 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .with(layer.with_filter(filter))
         .init();
 
-    let opt =
-        ConnectOptions::new("postgres://unistate_dev:unistate_dev@localhost:5432/unistate_dev");
+    let opt = ConnectOptions::new(env::var("DATABASE_URL")?);
     let db = Database::connect(opt).await?;
     // let client = CkbRpcClient::new("http://127.0.0.1:8114");
     let client =
@@ -52,14 +54,6 @@ async fn main() -> anyhow::Result<()> {
 
     let network = NetworkType::Mainnet;
     let mut height = constants::mainnet_info::START_RGBPP_HEIGHT.max(block_height_value);
-    // let mut height = 12826479u64;
-    // let mut height = 12799324u64;
-    // let mut height = 12801007u64;
-    // let mut height = 12801313u64;
-    // let mut height = 12800136u64;
-    // let mut height = 12000082u64.max(block_height_value);
-    // let mut height = 12429082u64;
-    // let mut height = 12800082u64.max(block_height_value);
 
     let mut target = client.get_tip_block_number().await?.value();
     let max_batch_size = 1000;
