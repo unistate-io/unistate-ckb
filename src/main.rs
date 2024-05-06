@@ -11,7 +11,7 @@ use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
 };
 
-use crate::constants::mainnet_info::{CLUSTER_TYPE_DEP, SPORE_TYPE_DEP};
+use crate::constants::mainnet_info::{CLUSTER_TYPE_DEP, RGBPP_LOCK_DEP, SPORE_TYPE_DEP};
 use entity::block_height;
 
 mod constants;
@@ -51,13 +51,13 @@ async fn main() -> anyhow::Result<()> {
     let block_height_value = block_height::Entity::find().one(&db).await?.unwrap().height as u64;
 
     let network = NetworkType::Mainnet;
-    // let mut height = constants::mainnet_info::START_RGBPP_HEIGHT;
+    let mut height = constants::mainnet_info::START_RGBPP_HEIGHT.max(block_height_value);
     // let mut height = 12826479u64;
     // let mut height = 12799324u64;
     // let mut height = 12801007u64;
     // let mut height = 12801313u64;
     // let mut height = 12800136u64;
-    let mut height = 12000082u64.max(block_height_value);
+    // let mut height = 12000082u64.max(block_height_value);
     // let mut height = 12429082u64;
     // let mut height = 12800082u64.max(block_height_value);
 
@@ -66,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let mut batch_size = (target - height).min(max_batch_size);
 
     loop {
+        info!("height: {height}");
+
         let numbers = (0..batch_size)
             .into_par_iter()
             .map(|i| BlockNumber::from(height + i))
@@ -73,48 +75,51 @@ async fn main() -> anyhow::Result<()> {
 
         let blocks = client.get_blocks(numbers).await?;
 
-        let txs = blocks
+        let (rgbpp_txs, spore_txs) = blocks
             .into_par_iter()
             .map(|block| {
-                block
-                    .transactions
-                    .into_par_iter()
-                    .filter(|tx| {
-                        // let rgbpp = tx.inner.cell_deps.par_iter().find_any(|cd| {
-                        //     cd.out_point
-                        //         .tx_hash
-                        //         .as_bytes()
-                        //         .eq(RGBPP_LOCK_DEP.out_point.tx_hash.as_bytes())
-                        // });
+                block.transactions.into_par_iter().filter_map(move |tx| {
+                    let rgbpp = tx.inner.cell_deps.par_iter().find_any(|cd| {
+                        cd.out_point
+                            .tx_hash
+                            .as_bytes()
+                            .eq(RGBPP_LOCK_DEP.out_point.tx_hash.as_bytes())
+                    });
 
-                        let spore = tx.inner.cell_deps.par_iter().find_any(|cd| {
-                            cd.out_point
+                    let spore = tx.inner.cell_deps.par_iter().find_any(|cd| {
+                        cd.out_point
+                            .tx_hash
+                            .as_bytes()
+                            .eq(SPORE_TYPE_DEP.out_point.tx_hash.as_bytes())
+                            || cd
+                                .out_point
                                 .tx_hash
                                 .as_bytes()
-                                .eq(SPORE_TYPE_DEP.out_point.tx_hash.as_bytes())
-                                || cd
-                                    .out_point
-                                    .tx_hash
-                                    .as_bytes()
-                                    .eq(CLUSTER_TYPE_DEP.out_point.tx_hash.as_bytes())
-                        });
+                                .eq(CLUSTER_TYPE_DEP.out_point.tx_hash.as_bytes())
+                    });
 
-                        spore.is_some() // || rgbpp.is_some()
-                    })
-                    .map(|tx| (tx, block.header.inner.timestamp.value()))
-                    .collect::<Vec<_>>()
+                    if rgbpp.is_none() && spore.is_none() {
+                        None
+                    } else {
+                        Some((
+                            rgbpp.map(|_| tx.clone()),
+                            spore.map(|_| (tx.clone(), block.header.inner.timestamp.value())),
+                        ))
+                    }
+                })
             })
             .flatten()
-            .collect::<Vec<_>>();
+            .unzip::<_, _, Vec<_>, Vec<_>>();
 
         height += batch_size;
         target = client.get_tip_block_number().await?.value();
         batch_size = (target - height).min(max_batch_size);
 
-        info!("height: {height}");
-
-        for (tx, timestamp) in txs {
+        for tx in rgbpp_txs.into_iter().filter_map(|op| op) {
             rgbpp::index_rgbpp_lock(&client, &db, &tx).await?;
+        }
+
+        for (tx, timestamp) in spore_txs.into_iter().filter_map(|op| op) {
             spore::index_spore(&db, &tx, timestamp, network).await?;
         }
 

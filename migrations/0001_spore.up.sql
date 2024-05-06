@@ -32,10 +32,10 @@ CREATE TABLE spore_actions (
     from_address_id VARCHAR,
     to_address_id VARCHAR,
     data_hash BYTEA,
-    content_type BYTEA,
+    content_type VARCHAR,
     content BYTEA,
-    cluster_name BYTEA,
-    cluster_description BYTEA,
+    cluster_name VARCHAR,
+    cluster_description TEXT,
     mutant_id BYTEA,
     created_at TIMESTAMP NOT NULL,
     FOREIGN KEY (from_address_id) REFERENCES addresses(id),
@@ -44,9 +44,8 @@ CREATE TABLE spore_actions (
 
 CREATE TABLE clusters (
     id BYTEA PRIMARY KEY,
-    cluster_name BYTEA,
-    content BYTEA,
-    cluster_description BYTEA,
+    cluster_name VARCHAR,
+    cluster_description TEXT,
     mutant_id BYTEA,
     owner_address VARCHAR,
     is_burned BOOLEAN NOT NULL DEFAULT FALSE,
@@ -57,7 +56,7 @@ CREATE TABLE clusters (
 
 CREATE TABLE spores (
     id BYTEA PRIMARY KEY,
-    content_type BYTEA,
+    content_type VARCHAR,
     content BYTEA,
     cluster_id BYTEA,
     owner_address VARCHAR,

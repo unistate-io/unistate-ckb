@@ -1,19 +1,20 @@
-use anyhow::Ok;
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
-use molecule::bytes::Buf;
-use molecule::prelude::{Entity, Reader as _};
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
-use sea_orm::DbConn;
-use sea_orm::{prelude::ActiveModelTrait as _, ActiveValue::NotSet, EntityTrait, Set};
-use tracing::debug;
+use molecule::{
+    bytes::Buf,
+    prelude::{Entity, Reader as _},
+};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use sea_orm::{prelude::ActiveModelTrait as _, ActiveValue::NotSet, DbConn, EntityTrait, Set};
+use tracing::{debug, error};
 
-use crate::schemas::spore_v1;
-use crate::schemas::spore_v2;
-use crate::schemas::top_level::WitnessLayoutReader;
-use crate::schemas::top_level::WitnessLayoutUnionReader;
-use crate::{entity, schemas::action};
+use crate::{
+    entity,
+    schemas::{
+        action, spore_v1, spore_v2,
+        top_level::{WitnessLayoutReader, WitnessLayoutUnionReader},
+    },
+};
 
 pub async fn index_spore(
     db: &DbConn,
@@ -50,6 +51,9 @@ pub async fn index_spore(
         .collect::<Vec<_>>();
 
     for (action, (spore_data, cluster_data)) in actions.into_iter().zip(outpus.into_iter()) {
+        let (spore_data, cluster_data) =
+            extract_data(action.action_type(), spore_data, cluster_data);
+
         upsert_spores(
             db,
             &action,
@@ -75,6 +79,18 @@ pub async fn index_spore(
     Ok(())
 }
 
+fn extract_data(
+    action: entity::sea_orm_active_enums::SporeActionType,
+    spore_data: Option<spore_v1::SporeData>,
+    cluster_data: Option<spore_v2::ClusterDataV2>,
+) -> (Option<spore_v1::SporeData>, Option<spore_v2::ClusterDataV2>) {
+    use entity::sea_orm_active_enums::SporeActionType::{BurnSpore, MintSpore, TransferSpore};
+    match action {
+        BurnSpore | MintSpore | TransferSpore => (spore_data, None),
+        _ => (None, cluster_data),
+    }
+}
+
 impl action::SporeActionUnion {
     fn action_type(&self) -> entity::sea_orm_active_enums::SporeActionType {
         use entity::sea_orm_active_enums::SporeActionType;
@@ -95,11 +111,11 @@ impl action::SporeActionUnion {
 
     fn spore_id(&self) -> Option<Vec<u8>> {
         match self {
-            action::SporeActionUnion::MintSpore(raw) => Some(raw.spore_id().as_bytes().to_vec()),
+            action::SporeActionUnion::MintSpore(raw) => Some(raw.spore_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferSpore(raw) => {
-                Some(raw.spore_id().as_bytes().to_vec())
+                Some(raw.spore_id().raw_data().to_vec())
             }
-            action::SporeActionUnion::BurnSpore(raw) => Some(raw.spore_id().as_bytes().to_vec()),
+            action::SporeActionUnion::BurnSpore(raw) => Some(raw.spore_id().raw_data().to_vec()),
             action::SporeActionUnion::MintCluster(_) => None,
             action::SporeActionUnion::TransferCluster(_) => None,
             action::SporeActionUnion::MintProxy(_) => None,
@@ -117,21 +133,21 @@ impl action::SporeActionUnion {
             action::SporeActionUnion::TransferSpore(_) => None,
             action::SporeActionUnion::BurnSpore(_) => None,
             action::SporeActionUnion::MintCluster(raw) => {
-                Some(raw.cluster_id().as_bytes().to_vec())
+                Some(raw.cluster_id().raw_data().to_vec())
             }
             action::SporeActionUnion::TransferCluster(raw) => {
-                Some(raw.cluster_id().as_bytes().to_vec())
+                Some(raw.cluster_id().raw_data().to_vec())
             }
-            action::SporeActionUnion::MintProxy(raw) => Some(raw.cluster_id().as_bytes().to_vec()),
+            action::SporeActionUnion::MintProxy(raw) => Some(raw.cluster_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferProxy(raw) => {
-                Some(raw.cluster_id().as_bytes().to_vec())
+                Some(raw.cluster_id().raw_data().to_vec())
             }
-            action::SporeActionUnion::BurnProxy(raw) => Some(raw.cluster_id().as_bytes().to_vec()),
-            action::SporeActionUnion::MintAgent(raw) => Some(raw.cluster_id().as_bytes().to_vec()),
+            action::SporeActionUnion::BurnProxy(raw) => Some(raw.cluster_id().raw_data().to_vec()),
+            action::SporeActionUnion::MintAgent(raw) => Some(raw.cluster_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferAgent(raw) => {
-                Some(raw.cluster_id().as_bytes().to_vec())
+                Some(raw.cluster_id().raw_data().to_vec())
             }
-            action::SporeActionUnion::BurnAgent(raw) => Some(raw.cluster_id().as_bytes().to_vec()),
+            action::SporeActionUnion::BurnAgent(raw) => Some(raw.cluster_id().raw_data().to_vec()),
         };
 
         let spore_data_cluster_id = spore_v1::SporeData::cluster_id_op(spore_data);
@@ -146,12 +162,12 @@ impl action::SporeActionUnion {
             action::SporeActionUnion::BurnSpore(_) => None,
             action::SporeActionUnion::MintCluster(_) => None,
             action::SporeActionUnion::TransferCluster(_) => None,
-            action::SporeActionUnion::MintProxy(raw) => Some(raw.proxy_id().as_bytes().to_vec()),
+            action::SporeActionUnion::MintProxy(raw) => Some(raw.proxy_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferProxy(raw) => {
-                Some(raw.cluster_id().as_bytes().to_vec())
+                Some(raw.cluster_id().raw_data().to_vec())
             }
-            action::SporeActionUnion::BurnProxy(raw) => Some(raw.proxy_id().as_bytes().to_vec()),
-            action::SporeActionUnion::MintAgent(raw) => Some(raw.proxy_id().as_bytes().to_vec()),
+            action::SporeActionUnion::BurnProxy(raw) => Some(raw.proxy_id().raw_data().to_vec()),
+            action::SporeActionUnion::MintAgent(raw) => Some(raw.proxy_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferAgent(_) => None,
             action::SporeActionUnion::BurnAgent(_) => None,
         }
@@ -200,7 +216,7 @@ impl action::SporeActionUnion {
 
     fn data_hash(&self) -> Option<Vec<u8>> {
         match self {
-            action::SporeActionUnion::MintSpore(raw) => Some(raw.data_hash().as_bytes().to_vec()),
+            action::SporeActionUnion::MintSpore(raw) => Some(raw.data_hash().raw_data().to_vec()),
             action::SporeActionUnion::TransferSpore(_) => None,
             action::SporeActionUnion::BurnSpore(_) => None,
             action::SporeActionUnion::MintCluster(_) => None,
@@ -231,32 +247,58 @@ impl action::AddressUnion {
 }
 
 impl spore_v1::SporeData {
-    fn content_type_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.map(|data| data.content_type().as_bytes().to_vec())
+    fn content_type_op(op: Option<&Self>) -> Option<String> {
+        debug!("content_type.");
+
+        op.map(|data| data.content_type().into_string())
     }
 
     fn content_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.map(|data| data.content().as_bytes().to_vec())
+        debug!("content.");
+
+        op.map(|data| data.content().raw_data().to_vec())
     }
 
     fn cluster_id_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.and_then(|data| data.cluster_id().to_opt())
-            .map(|bytes| bytes.as_bytes().to_vec())
+        op.and_then(|data| data.cluster_id().to_opt()).map(|bytes| {
+            let id = bytes.raw_data().to_vec();
+
+            debug!("cluster id: {}", hex::encode(&id));
+
+            id
+        })
+    }
+}
+
+impl spore_v1::Bytes {
+    pub fn into_string(&self) -> String {
+        let res = String::from_utf8(self.raw_data().to_vec());
+        match res {
+            Ok(s) => s,
+            Err(e) => {
+                error!("into_string error: {e:?}");
+                String::new()
+            }
+        }
     }
 }
 
 impl spore_v2::ClusterDataV2 {
-    fn description_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.map(|data| data.description().as_bytes().to_vec())
+    fn description_op(op: Option<&Self>) -> Option<String> {
+        debug!("description.");
+
+        op.map(|data| data.description().into_string())
     }
 
-    fn name_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.map(|data| data.name().as_bytes().to_vec())
+    fn name_op(op: Option<&Self>) -> Option<String> {
+        debug!("name.");
+
+        op.map(|data| data.name().into_string())
     }
 
     fn mutant_id_op(op: Option<&Self>) -> Option<Vec<u8>> {
         op.and_then(|data| data.mutant_id().to_opt())
-            .map(|bytes| bytes.as_bytes().to_vec())
+            .map(|bytes| bytes.raw_data().to_vec())
     }
 }
 
@@ -285,9 +327,9 @@ async fn upsert_address(
         // Insert address
         addresses::ActiveModel {
             id: Set(address_id),
-            script_code_hash: Set(script.code_hash().as_bytes().to_vec()),
+            script_code_hash: Set(script.code_hash().raw_data().to_vec()),
             script_hash_type: Set(script.hash_type().as_bytes().get_u8() as i16),
-            script_args: Set(script.args().as_bytes().to_vec()),
+            script_args: Set(script.args().raw_data().to_vec()),
         }
         .insert(db)
         .await?;

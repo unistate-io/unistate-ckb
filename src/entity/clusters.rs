@@ -11,12 +11,9 @@ pub struct Model {
         column_type = "Binary(BlobSize::Blob(None))"
     )]
     pub id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub cluster_name: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub content: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub cluster_description: Option<Vec<u8>>,
+    pub cluster_name: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub cluster_description: Option<String>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
     pub mutant_id: Option<Vec<u8>>,
     pub owner_address: Option<String>,

@@ -11,8 +11,7 @@ pub struct Model {
         column_type = "Binary(BlobSize::Blob(None))"
     )]
     pub id: Vec<u8>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub content_type: Option<Vec<u8>>,
+    pub content_type: Option<String>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
     pub content: Option<Vec<u8>>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
