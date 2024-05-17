@@ -1,21 +1,17 @@
-use std::collections::{HashMap, HashSet};
-
 use ckb_jsonrpc_types::TransactionView;
-use ckb_sdk::rpc::ResponseFormatGetter as _;
 use ckb_types::H256;
 use jsonrpsee::http_client::HttpClient;
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
 };
-use rayon::prelude::{
-    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
-    ParallelIterator as _,
-};
+use rayon::prelude::{IntoParallelRefIterator as _, ParallelIterator as _};
 use sea_orm::{
     prelude::{ActiveModelTrait as _, DbConn, EntityTrait as _},
     Set,
 };
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::debug;
 
 use crate::{
@@ -23,10 +19,47 @@ use crate::{
     schemas::{blockchain, rgbpp},
 };
 
-pub async fn index_rgbpp_lock(
+pub struct RgbppIndexer {
+    db: DbConn,
+    stream: ReceiverStream<TransactionView>,
+    fetcher: Fetcher<HttpClient>,
+}
+
+impl RgbppIndexer {
+    pub fn new(
+        db: &DbConn,
+        fetcher: &Fetcher<HttpClient>,
+    ) -> (Self, mpsc::Sender<TransactionView>) {
+        let (tx, rx) = mpsc::channel(100);
+        (
+            Self {
+                db: db.clone(),
+                fetcher: fetcher.clone(),
+                stream: ReceiverStream::new(rx),
+            },
+            tx,
+        )
+    }
+
+    pub async fn index(self) -> Result<(), anyhow::Error> {
+        let Self {
+            db,
+            mut stream,
+            fetcher,
+        } = self;
+
+        while let Some(tx) = stream.next().await {
+            index_rgbpp_lock(&fetcher, &db, tx).await?;
+        }
+
+        Ok(())
+    }
+}
+
+async fn index_rgbpp_lock(
     fetcher: &Fetcher<HttpClient>,
     db: &DbConn,
-    tx: &TransactionView,
+    tx: TransactionView,
 ) -> anyhow::Result<()> {
     debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
 
@@ -54,48 +87,14 @@ pub async fn index_rgbpp_lock(
         upsert_rgbpp_unlock(db, &unlock, tx.hash.clone()).await?;
     }
 
-    let (inputs_hashs, inputs_idx) = tx
-        .inner
-        .inputs
+    let pre_outputs = fetcher.get_outputs(tx.inner.inputs).await?;
+
+    let inputs = pre_outputs
         .par_iter()
-        .map(|input| {
-            (
-                input.previous_output.tx_hash.clone(),
-                input.previous_output.index,
-            )
-        })
-        .unzip::<_, _, Vec<_>, Vec<_>>();
-
-    let hashs = inputs_hashs
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let txs = fetcher
-        .get_txs(hashs)
-        .await?
-        .into_par_iter()
-        .filter_map(|tx| tx.transaction)
-        .filter_map(|tx| tx.get_value().ok())
-        .map(|tx| (tx.hash, tx.inner))
-        .collect::<HashMap<_, _>>();
-
-    let inputs = inputs_hashs
-        .par_iter()
-        .zip(inputs_idx.par_iter())
-        .filter_map(|(key, idx)| {
-            txs.get(key)
-                .and_then(|tx| tx.outputs.get(idx.value() as usize))
-                .cloned()
-        })
         .filter_map(|output| {
-            let rgbpp_lock = rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
+            rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
                 .ok()
-                .map(|reader| reader.to_entity());
-
-            rgbpp_lock
+                .map(|reader| reader.to_entity())
         })
         .collect::<Vec<_>>();
 

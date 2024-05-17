@@ -1,18 +1,23 @@
 use core::time::Duration;
 use std::env;
 
-use ckb_jsonrpc_types::BlockNumber;
+use ckb_jsonrpc_types::{BlockNumber, TransactionView};
 use ckb_sdk::NetworkType;
 
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
 use sea_orm::{ActiveModelTrait, ConnectOptions, Database, EntityTrait};
 
-use tracing::info;
+use tokio::select;
+use tracing::{debug, info};
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
 };
 
-use crate::constants::mainnet_info::{CLUSTER_TYPE_DEP, RGBPP_LOCK_DEP, SPORE_TYPE_DEP};
+use crate::constants::mainnet_info::{
+    CLUSTER_TYPE_DEP, RGBPP_LOCK_DEP, SPORE_TYPE_DEP, XUDTTYPE_DEP,
+};
 use entity::block_height;
 
 mod constants;
@@ -23,6 +28,15 @@ mod rgbpp;
 mod schemas;
 mod spore;
 mod xudt;
+
+struct TxWithStates {
+    is_spore: bool,
+    is_xudt: bool,
+    is_rgbpp: bool,
+    tx: TransactionView,
+    timestamp: u64,
+    height: u64,
+}
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -55,78 +69,127 @@ async fn main() -> anyhow::Result<()> {
     let network = NetworkType::Mainnet;
     let mut height = constants::mainnet_info::START_RGBPP_HEIGHT.max(block_height_value);
 
-    let mut target = client.get_tip_block_number().await?.value();
+    let target = client.get_tip_block_number().await?.value();
     let max_batch_size = 1000;
     let mut batch_size = (target - height).min(max_batch_size);
 
-    loop {
-        info!("height: {height}");
+    let (spore_indexer, spore_sender) = spore::SporeIndexer::new(&db, network);
+    let spore_task = tokio::spawn(spore_indexer.index());
+    let (rgbpp_indexer, rgbpp_sender) = rgbpp::RgbppIndexer::new(&db, &client);
+    let rgbpp_task = tokio::spawn(rgbpp_indexer.index());
+    let (xudt_indexer, xudt_sender) = xudt::XudtIndexer::new(&db, &client);
+    let xudt_task = tokio::spawn(xudt_indexer.index());
 
-        let numbers = (0..batch_size)
-            .into_par_iter()
-            .map(|i| BlockNumber::from(height + i))
-            .collect::<Vec<_>>();
+    let main_task: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
+        loop {
+            info!("height: {height}");
 
-        let blocks = client.get_blocks(numbers).await?;
+            let numbers = (0..batch_size)
+                .into_par_iter()
+                .map(|i| BlockNumber::from(height + i))
+                .collect::<Vec<_>>();
 
-        let (rgbpp_txs, spore_txs) = blocks
-            .into_par_iter()
-            .map(|block| {
-                block.transactions.into_par_iter().filter_map(move |tx| {
-                    let rgbpp = tx.inner.cell_deps.par_iter().find_any(|cd| {
-                        cd.out_point
-                            .tx_hash
-                            .as_bytes()
-                            .eq(RGBPP_LOCK_DEP.out_point.tx_hash.as_bytes())
-                    });
+            let blocks = client.get_blocks(numbers).await?;
 
-                    let spore = tx.inner.cell_deps.par_iter().find_any(|cd| {
-                        cd.out_point
-                            .tx_hash
-                            .as_bytes()
-                            .eq(SPORE_TYPE_DEP.out_point.tx_hash.as_bytes())
-                            || cd
-                                .out_point
-                                .tx_hash
-                                .as_bytes()
-                                .eq(CLUSTER_TYPE_DEP.out_point.tx_hash.as_bytes())
-                    });
+            let txs = blocks
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, block)| {
+                    block.transactions.into_par_iter().filter_map(move |tx| {
+                        let rgbpp = tx
+                            .inner
+                            .cell_deps
+                            .par_iter()
+                            .find_any(|cd| RGBPP_LOCK_DEP.out_point.eq(&cd.out_point));
 
-                    if rgbpp.is_none() && spore.is_none() {
-                        None
-                    } else {
-                        Some((
-                            rgbpp.map(|_| tx.clone()),
-                            spore.map(|_| (tx.clone(), block.header.inner.timestamp.value())),
-                        ))
-                    }
+                        let spore = tx.inner.cell_deps.par_iter().find_any(|cd| {
+                            SPORE_TYPE_DEP.out_point.eq(&cd.out_point)
+                                || CLUSTER_TYPE_DEP.out_point.eq(&cd.out_point)
+                        });
+
+                        let xudt = tx
+                            .inner
+                            .cell_deps
+                            .par_iter()
+                            .find_any(|cd| XUDTTYPE_DEP.out_point.eq(&cd.out_point));
+                        let is_spore = spore.is_some();
+                        let is_xudt = xudt.is_some();
+                        let is_rgbpp = rgbpp.is_some();
+
+                        if is_rgbpp || is_xudt || is_spore {
+                            Some(TxWithStates {
+                                is_spore,
+                                is_xudt,
+                                is_rgbpp,
+                                tx,
+                                timestamp: block.header.inner.timestamp.value(),
+                                height: height + i as u64,
+                            })
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
-            .flatten()
-            .unzip::<_, _, Vec<_>, Vec<_>>();
+                .flatten()
+                .collect::<Vec<_>>();
 
-        height += batch_size;
-        target = client.get_tip_block_number().await?.value();
-        batch_size = (target - height).min(max_batch_size);
+            height += batch_size;
+            batch_size =
+                (client.get_tip_block_number().await?.value() - height).min(max_batch_size);
 
-        for tx in rgbpp_txs.into_iter().filter_map(|op| op) {
-            rgbpp::index_rgbpp_lock(&client, &db, &tx).await?;
+            for tx in txs.into_iter() {
+                if tx.is_rgbpp {
+                    rgbpp_sender.send(tx.tx.clone()).await?;
+                }
+
+                if tx.is_spore {
+                    spore_sender
+                        .send(spore::SporeTx {
+                            tx: tx.tx.clone(),
+                            timestamp: tx.timestamp,
+                        })
+                        .await?;
+                }
+
+                if tx.is_xudt {
+                    xudt_sender
+                        .send(xudt::XudtTx {
+                            tx: tx.tx,
+                            timestamp: tx.timestamp,
+                            height: tx.height,
+                        })
+                        .await?;
+                }
+            }
+
+            block_height::ActiveModel {
+                id: sea_orm::Set(1),
+                height: sea_orm::Set(height as i64),
+            }
+            .update(&db)
+            .await?;
+
+            if batch_size == 0 {
+                info!("sleeping...");
+                tokio::time::sleep(Duration::from_secs(6)).await;
+            }
         }
+    });
 
-        for (tx, timestamp) in spore_txs.into_iter().filter_map(|op| op) {
-            spore::index_spore(&db, &tx, timestamp, network).await?;
+    select! {
+        res = spore_task => {
+            debug!("spore res: {res:?}");
         }
-
-        block_height::ActiveModel {
-            id: sea_orm::Set(1),
-            height: sea_orm::Set(height as i64),
+        res = rgbpp_task => {
+            debug!("rgbpp res: {res:?}");
         }
-        .update(&db)
-        .await?;
-
-        if batch_size == 0 {
-            info!("sleeping...");
-            tokio::time::sleep(Duration::from_secs(6)).await;
+        res = xudt_task => {
+            debug!("xudt res: {res:?}");
+        }
+        res = main_task => {
+            debug!("main res: {res:?}");
         }
     }
+
+    Ok(())
 }
