@@ -6,6 +6,8 @@ use molecule::{
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sea_orm::{prelude::ActiveModelTrait as _, ActiveValue::NotSet, DbConn, EntityTrait, Set};
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::{debug, error};
 
 use crate::{
@@ -16,7 +18,46 @@ use crate::{
     },
 };
 
-pub async fn index_spore(
+pub struct SporeTx {
+    pub tx: TransactionView,
+    pub timestamp: u64,
+}
+
+pub struct SporeIndexer {
+    db: DbConn,
+    stream: ReceiverStream<SporeTx>,
+    network: ckb_sdk::NetworkType,
+}
+
+impl SporeIndexer {
+    pub fn new(db: &DbConn, network: ckb_sdk::NetworkType) -> (Self, mpsc::Sender<SporeTx>) {
+        let (tx, rx) = mpsc::channel(100);
+        (
+            Self {
+                db: db.clone(),
+                stream: ReceiverStream::new(rx),
+                network,
+            },
+            tx,
+        )
+    }
+
+    pub async fn index(self) -> Result<(), anyhow::Error> {
+        let Self {
+            db,
+            mut stream,
+            network,
+        } = self;
+
+        while let Some(SporeTx { tx, timestamp }) = stream.next().await {
+            index_spore(&db, &tx, timestamp, network).await?;
+        }
+
+        Ok(())
+    }
+}
+
+async fn index_spore(
     db: &DbConn,
     tx: &TransactionView,
     timestamp: u64,

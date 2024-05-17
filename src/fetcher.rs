@@ -1,4 +1,10 @@
-use ckb_jsonrpc_types::{BlockNumber, BlockView, TransactionWithStatusResponse};
+use std::collections::{HashMap, HashSet};
+
+use ckb_jsonrpc_types::{
+    BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, Transaction,
+    TransactionWithStatusResponse,
+};
+use ckb_sdk::rpc::ResponseFormatGetter;
 use ckb_types::H256;
 use jsonrpsee::{
     core::{
@@ -8,9 +14,12 @@ use jsonrpsee::{
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use tracing::debug;
 
 use crate::error::Error;
 
+#[derive(Debug, Clone)]
 pub struct Fetcher<C> {
     client: C,
     retry_interval: u64,
@@ -161,6 +170,112 @@ where
             Ok(())
         })
         .await
+    }
+
+    pub async fn get_txs_by_hashes(
+        &self,
+        hashes: Vec<H256>,
+    ) -> Result<HashMap<H256, Transaction>, Error> {
+        debug!("Getting transactions by hashes: {:?}", hashes);
+        let txs = self
+            .get_txs(hashes)
+            .await?
+            .into_par_iter()
+            .filter_map(|tx| {
+                tx.transaction
+                    .and_then(|t| match t.get_value() {
+                        Ok(v) => {
+                            debug!("Got transaction: {:?}", v);
+                            Some(v)
+                        }
+                        Err(e) => {
+                            debug!("Failed to get transaction value: {e:?}");
+                            None
+                        }
+                    })
+                    .map(|tx| (tx.hash, tx.inner))
+            })
+            .collect::<HashMap<_, _>>();
+
+        debug!("Got transactions: {:?}", txs);
+        Ok(txs)
+    }
+
+    pub async fn get_outputs(&self, inputs: Vec<CellInput>) -> Result<Vec<CellOutput>, Error> {
+        debug!("Getting outputs for inputs: {:?}", inputs);
+        let hashs = inputs
+            .par_iter()
+            .map(|input| input.previous_output.tx_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_par_iter()
+            .collect::<Vec<_>>();
+
+        debug!("Getting transactions by hashes: {:?}", hashs);
+        let txs = self.get_txs_by_hashes(hashs).await?;
+
+        let res = inputs
+            .into_par_iter()
+            .map(|input| {
+                let idx = input.previous_output.index.value();
+                let tx = txs.get(&input.previous_output.tx_hash);
+                let output = tx
+                    .and_then(|tx| tx.outputs.get(idx as usize).cloned())
+                    .ok_or_else(|| Error::PreviousOutputNotFound {
+                        tx_hash: input.previous_output.tx_hash.clone(),
+                        index: idx,
+                    });
+                debug!("Got output for input: {:?} -> {:?}", input, output);
+                output
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        debug!("Got outputs: {:?}", res);
+        Ok(res)
+    }
+
+    pub async fn get_outputs_with_data(
+        &self,
+        inputs: Vec<CellInput>,
+    ) -> Result<Vec<(CellOutput, JsonBytes)>, Error> {
+        debug!("Getting outputs with data for inputs: {:?}", inputs);
+        let hashs = inputs
+            .par_iter()
+            .map(|input| input.previous_output.tx_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_par_iter()
+            .collect::<Vec<_>>();
+
+        debug!("Getting transactions by hashes: {:?}", hashs);
+        let txs = self.get_txs_by_hashes(hashs).await?;
+
+        let res = inputs
+            .into_par_iter()
+            .map(|input| {
+                let idx = input.previous_output.index.value();
+                let tx = txs.get(&input.previous_output.tx_hash);
+                let output = tx
+                    .and_then(|tx| tx.outputs.get(idx as usize).cloned())
+                    .ok_or_else(|| Error::PreviousOutputNotFound {
+                        tx_hash: input.previous_output.tx_hash.clone(),
+                        index: idx,
+                    });
+                let output_data = tx
+                    .and_then(|tx| tx.outputs_data.get(idx as usize).cloned())
+                    .ok_or_else(|| Error::PreviousOutputDataNotFound {
+                        tx_hash: input.previous_output.tx_hash.clone(),
+                        index: idx,
+                    });
+                let result = output.and_then(|output| output_data.map(|data| (output, data)));
+                debug!(
+                    "Got output with data for input: {:?} -> {:?}",
+                    input, result
+                );
+                result
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        debug!("Got outputs with data: {:?}", res);
+        Ok(res)
     }
 }
 
