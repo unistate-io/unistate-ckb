@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let spore_task = tokio::spawn(spore_indexer.index());
     let (rgbpp_indexer, rgbpp_sender) = rgbpp::RgbppIndexer::new(&db, &client);
     let rgbpp_task = tokio::spawn(rgbpp_indexer.index());
-    let (xudt_indexer, xudt_sender) = xudt::XudtIndexer::new(&db, &client);
+    let (xudt_indexer, xudt_sender) = xudt::XudtIndexer::new(&db, &client, network);
     let xudt_task = tokio::spawn(xudt_indexer.index());
 
     let main_task: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
@@ -152,13 +152,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 if tx.is_xudt {
-                    xudt_sender
-                        .send(xudt::XudtTx {
-                            tx: tx.tx,
-                            timestamp: tx.timestamp,
-                            height: tx.height,
-                        })
-                        .await?;
+                    xudt_sender.send(xudt::XudtTx { tx: tx.tx }).await?;
                 }
             }
 

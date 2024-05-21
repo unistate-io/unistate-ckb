@@ -147,7 +147,7 @@ async fn upsert_rgbpp_lock(
         // Insert rgbpp lock
         rgbpp_locks::ActiveModel {
             lock_id: Set(lock_id),
-            out_index: Set(rgbpp_lock.out_index().raw_data().get_u32() as i32),
+            out_index: Set(rgbpp_lock.out_index().raw_data().get_u32_le() as i32),
             btc_txid: Set(txid),
             tx: Set(tx.0.to_vec()),
         }
@@ -182,7 +182,7 @@ async fn upsert_rgbpp_unlock(
         // Insert rgbpp lock
         rgbpp_unlocks::ActiveModel {
             unlock_id: Set(unlock_id),
-            version: Set(rgbpp_unlock.version().raw_data().get_u16() as i16),
+            version: Set(rgbpp_unlock.version().raw_data().get_u16_le() as i16),
             input_len: Set(rgbpp_unlock.extra_data().input_len().as_bytes().get_u8() as i16),
             output_len: Set(rgbpp_unlock.extra_data().output_len().as_bytes().get_u8() as i16),
             btc_tx: Set(rgbpp_unlock.btc_tx().as_bytes().to_vec()),
