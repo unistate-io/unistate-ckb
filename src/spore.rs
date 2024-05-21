@@ -349,11 +349,11 @@ fn to_timestamp(timestamp: u64) -> chrono::NaiveDateTime {
         .naive_utc()
 }
 
-async fn upsert_address(
+pub async fn upsert_address(
     db: &DbConn,
     address: &action::AddressUnion,
     network: ckb_sdk::NetworkType,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     use entity::addresses;
 
     let address_id = address.to_string(network);
@@ -367,7 +367,7 @@ async fn upsert_address(
         let script = address.script();
         // Insert address
         addresses::ActiveModel {
-            id: Set(address_id),
+            id: Set(address_id.clone()),
             script_code_hash: Set(script.code_hash().raw_data().to_vec()),
             script_hash_type: Set(script.hash_type().as_bytes().get_u8() as i16),
             script_args: Set(script.args().raw_data().to_vec()),
@@ -376,7 +376,7 @@ async fn upsert_address(
         .await?;
     }
 
-    Ok(())
+    Ok(address_id)
 }
 
 async fn upsert_spores(
