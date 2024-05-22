@@ -4,7 +4,7 @@ use super::sea_orm_active_enums::CellStatus;
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "xudtcell")]
+#[sea_orm(table_name = "xudt_cell")]
 pub struct Model {
     #[sea_orm(
         primary_key,
@@ -25,6 +25,9 @@ pub struct Model {
     pub xudt_data_lock: Option<Vec<u8>>,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
     pub xudt_owner_lock_script_hash: Option<Vec<u8>>,
+    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
+    pub input_transaction_hash: Option<Vec<u8>>,
+    pub input_transaction_index: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
