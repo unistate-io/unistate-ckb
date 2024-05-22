@@ -28,6 +28,7 @@ mod rgbpp;
 mod schemas;
 mod spore;
 mod xudt;
+mod unique;
 
 struct TxWithStates {
     is_spore: bool,
@@ -62,12 +63,12 @@ async fn main() -> anyhow::Result<()> {
     let db = Database::connect(opt).await?;
     // let client = CkbRpcClient::new("http://127.0.0.1:8114");
     let client =
-        fetcher::Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 104857600, 104857600)?;
+        fetcher::Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 1048576000, 104857600)?;
 
     let block_height_value = block_height::Entity::find().one(&db).await?.unwrap().height as u64;
 
     let network = NetworkType::Mainnet;
-    let mut height = constants::mainnet_info::START_RGBPP_HEIGHT.max(block_height_value);
+    let mut height = constants::mainnet_info::DEFAULT_START_HEIGHT.max(block_height_value);
 
     let target = client.get_tip_block_number().await?.value();
     let max_batch_size = 1000;

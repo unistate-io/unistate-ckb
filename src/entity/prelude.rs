@@ -7,4 +7,5 @@ pub use super::rgbpp_locks::Entity as RgbppLocks;
 pub use super::rgbpp_unlocks::Entity as RgbppUnlocks;
 pub use super::spore_actions::Entity as SporeActions;
 pub use super::spores::Entity as Spores;
-pub use super::xudtcell::Entity as Xudtcell;
+pub use super::token_info::Entity as TokenInfo;
+pub use super::xudt_cell::Entity as XudtCell;

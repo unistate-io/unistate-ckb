@@ -63,7 +63,7 @@ macro_rules! define_info_mod {
         pub mod $mod_name {
             use super::*;
 
-            pub const START_RGBPP_HEIGHT: u64 = $start_height;
+            pub const DEFAULT_START_HEIGHT: u64 = $start_height;
 
             define_deps!(
                 SECP256_K1_LOCK_DEP,
@@ -209,7 +209,7 @@ define_info_mod! {
 
 define_info_mod! {
     mainnet_info,
-    12026092,
+    11922670,
     // Secp256k1LockDep
     "71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c",
     // RgbppLockDep

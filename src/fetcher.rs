@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ckb_jsonrpc_types::{
-    BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, Transaction,
+    BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, OutPoint, Transaction,
     TransactionWithStatusResponse,
 };
 use ckb_sdk::rpc::ResponseFormatGetter;
@@ -236,7 +236,7 @@ where
     pub async fn get_outputs_with_data(
         &self,
         inputs: Vec<CellInput>,
-    ) -> Result<Vec<(CellOutput, JsonBytes)>, Error> {
+    ) -> Result<Vec<(OutPoint, CellOutput, JsonBytes)>, Error> {
         debug!("Getting outputs with data for inputs: {:?}", inputs);
         let hashs = inputs
             .par_iter()
@@ -265,7 +265,9 @@ where
                         tx_hash: input.previous_output.tx_hash.clone(),
                         index: idx,
                     });
-                let result = output.and_then(|output| output_data.map(|data| (output, data)));
+                let result = output.and_then(|output| {
+                    output_data.map(|data| (input.previous_output.clone(), output, data))
+                });
                 debug!(
                     "Got output with data for input: {:?} -> {:?}",
                     input, result
