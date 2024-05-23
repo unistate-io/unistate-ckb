@@ -23,6 +23,7 @@ sea-orm = { version = "0.12", features = [
 ] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+futures = "0.3"
 chrono = { version = "0.4.38", features = ["serde"] }
 sha3 = "0.10.8"
 rayon = "1"

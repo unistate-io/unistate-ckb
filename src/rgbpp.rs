@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
 use jsonrpsee::http_client::HttpClient;
@@ -10,7 +12,7 @@ use sea_orm::{
     prelude::{ActiveModelTrait as _, DbConn, EntityTrait as _},
     Set,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::debug;
 
@@ -48,11 +50,13 @@ impl RgbppIndexer {
             fetcher,
         } = self;
 
-        while let Some(tx) = stream.next().await {
-            index_rgbpp_lock(&fetcher, &db, tx).await?;
+        loop {
+            if let Some(tx) = stream.next().await {
+                index_rgbpp_lock(&fetcher, &db, tx).await?;
+            } else {
+                sleep(Duration::from_secs(2)).await;
+            }
         }
-
-        Ok(())
     }
 }
 

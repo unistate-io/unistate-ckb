@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
 use molecule::{
@@ -5,13 +7,18 @@ use molecule::{
     prelude::{Entity, Reader as _},
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use sea_orm::{prelude::ActiveModelTrait as _, ActiveValue::NotSet, DbConn, EntityTrait, Set};
-use tokio::sync::mpsc;
+use sea_orm::{
+    prelude::{ActiveModelTrait as _, DbErr},
+    sea_query::OnConflict,
+    ActiveValue::NotSet,
+    DbConn, EntityTrait, Set,
+};
+use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::{debug, error};
 
 use crate::{
-    entity,
+    entity::{self, addresses},
     schemas::{
         action, spore_v1, spore_v2,
         top_level::{WitnessLayoutReader, WitnessLayoutUnionReader},
@@ -27,16 +34,21 @@ pub struct SporeIndexer {
     db: DbConn,
     stream: ReceiverStream<SporeTx>,
     network: ckb_sdk::NetworkType,
+    receiver: mpsc::Receiver<addresses::ActiveModel>,
+    pub sender: mpsc::Sender<addresses::ActiveModel>,
 }
 
 impl SporeIndexer {
     pub fn new(db: &DbConn, network: ckb_sdk::NetworkType) -> (Self, mpsc::Sender<SporeTx>) {
         let (tx, rx) = mpsc::channel(100);
+        let (sender, receiver) = mpsc::channel(100);
         (
             Self {
                 db: db.clone(),
                 stream: ReceiverStream::new(rx),
                 network,
+                sender,
+                receiver,
             },
             tx,
         )
@@ -47,13 +59,88 @@ impl SporeIndexer {
             db,
             mut stream,
             network,
+            mut receiver,
+            sender,
         } = self;
+        let address_db = db.clone();
+        let address_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    Some(msg) = receiver.recv() => {
+                        upsert_address_model(msg, &address_db).await?;
+                        // buffer.push(msg);
+                        // if buffer.len() > 1000 {
+                        //     upsert_many_address(&mut buffer, &address_db).await?;
+                        //     interval.reset();
+                        // }
+                    }
+                    _ =  interval.tick() => {
+                        if !buffer.is_empty() {
+                            upsert_many_address(&mut buffer, &address_db).await?;
+                        }
+                    }
+                }
+            }
+        });
 
-        while let Some(SporeTx { tx, timestamp }) = stream.next().await {
-            index_spore(&db, &tx, timestamp, network).await?;
+        let main_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            loop {
+                if let Some(SporeTx { tx, timestamp }) = stream.next().await {
+                    index_spore(&db, &tx, timestamp, network, &sender).await?;
+                } else {
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        });
+
+        tokio::select! {
+            res = address_task => {
+                debug!("address_task res: {res:?}");
+            }
+            res = main_task => {
+                debug!("main_task res: {res:?}");
+            }
         }
 
         Ok(())
+    }
+}
+
+async fn upsert_many_address(
+    buffer: &mut Vec<addresses::ActiveModel>,
+    address_db: &DbConn,
+) -> Result<(), anyhow::Error> {
+    match addresses::Entity::insert_many(buffer.drain(..))
+        .on_conflict(
+            OnConflict::column(addresses::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(address_db)
+        .await
+    {
+        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn upsert_address_model(
+    model: addresses::ActiveModel,
+    address_db: &DbConn,
+) -> Result<(), anyhow::Error> {
+    match addresses::Entity::insert(model)
+        .on_conflict(
+            OnConflict::column(addresses::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(address_db)
+        .await
+    {
+        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -62,6 +149,7 @@ async fn index_spore(
     tx: &TransactionView,
     timestamp: u64,
     network: ckb_sdk::NetworkType,
+    sender: &mpsc::Sender<addresses::ActiveModel>,
 ) -> anyhow::Result<()> {
     let actions = extract_actions(tx);
 
@@ -102,6 +190,7 @@ async fn index_spore(
             cluster_data.as_ref(),
             network,
             timestamp,
+            sender.clone(),
         )
         .await?;
 
@@ -113,6 +202,7 @@ async fn index_spore(
             tx.hash.clone(),
             network,
             timestamp,
+            sender,
         )
         .await?;
     }
@@ -350,31 +440,22 @@ fn to_timestamp(timestamp: u64) -> chrono::NaiveDateTime {
 }
 
 pub async fn upsert_address(
-    db: &DbConn,
     address: &action::AddressUnion,
     network: ckb_sdk::NetworkType,
+    sender: mpsc::Sender<addresses::ActiveModel>,
 ) -> anyhow::Result<String> {
-    use entity::addresses;
-
     let address_id = address.to_string(network);
 
-    let address_exists = addresses::Entity::find_by_id(&address_id)
-        .one(db)
-        .await?
-        .is_some();
+    let script = address.script();
+    // Insert address
+    let address = addresses::ActiveModel {
+        id: Set(address_id.clone()),
+        script_code_hash: Set(script.code_hash().raw_data().to_vec()),
+        script_hash_type: Set(script.hash_type().as_bytes().get_u8() as i16),
+        script_args: Set(script.args().raw_data().to_vec()),
+    };
 
-    if !address_exists {
-        let script = address.script();
-        // Insert address
-        addresses::ActiveModel {
-            id: Set(address_id.clone()),
-            script_code_hash: Set(script.code_hash().raw_data().to_vec()),
-            script_hash_type: Set(script.hash_type().as_bytes().get_u8() as i16),
-            script_args: Set(script.args().raw_data().to_vec()),
-        }
-        .insert(db)
-        .await?;
-    }
+    sender.send(address).await?;
 
     Ok(address_id)
 }
@@ -386,6 +467,7 @@ async fn upsert_spores(
     cluster_data: Option<&spore_v2::ClusterDataV2>,
     network: ckb_sdk::NetworkType,
     timestamp: u64,
+    sender: mpsc::Sender<addresses::ActiveModel>,
 ) -> anyhow::Result<()> {
     let now = to_timestamp(timestamp);
 
@@ -396,7 +478,7 @@ async fn upsert_spores(
     use entity::{clusters, spores};
 
     if let Some(address) = action.to_address() {
-        upsert_address(db, &address, network).await?;
+        upsert_address(&address, network, sender).await?;
     }
 
     let to = action.to_address_id(network);
@@ -493,9 +575,10 @@ async fn insert_action(
     tx: H256,
     network: ckb_sdk::NetworkType,
     timestamp: u64,
+    sender: &mpsc::Sender<addresses::ActiveModel>,
 ) -> anyhow::Result<()> {
     if let Some(from) = action.from_address() {
-        upsert_address(db, &from, network).await?;
+        upsert_address(&from, network, sender.clone()).await?;
     }
 
     let action = entity::spore_actions::ActiveModel {

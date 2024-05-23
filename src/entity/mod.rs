@@ -12,3 +12,4 @@ pub mod spore_actions;
 pub mod spores;
 pub mod token_info;
 pub mod xudt_cell;
+pub mod xudt_status_cell;

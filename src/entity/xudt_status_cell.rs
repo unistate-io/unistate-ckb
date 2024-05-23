@@ -3,23 +3,19 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "spores")]
+#[sea_orm(table_name = "xudt_status_cell")]
 pub struct Model {
     #[sea_orm(
         primary_key,
         auto_increment = false,
         column_type = "Binary(BlobSize::Blob(None))"
     )]
-    pub id: Vec<u8>,
-    pub content_type: Option<String>,
+    pub transaction_hash: Vec<u8>,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub transaction_index: i32,
     #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub content: Option<Vec<u8>>,
-    #[sea_orm(column_type = "Binary(BlobSize::Blob(None))", nullable)]
-    pub cluster_id: Option<Vec<u8>>,
-    pub owner_address: Option<String>,
-    pub is_burned: bool,
-    pub created_at: DateTime,
-    pub updated_at: DateTime,
+    pub input_transaction_hash: Option<Vec<u8>>,
+    pub input_transaction_index: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

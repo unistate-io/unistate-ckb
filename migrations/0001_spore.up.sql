@@ -37,9 +37,7 @@ CREATE TABLE spore_actions (
     cluster_name VARCHAR,
     cluster_description TEXT,
     mutant_id BYTEA,
-    created_at TIMESTAMP NOT NULL,
-    FOREIGN KEY (from_address_id) REFERENCES addresses(id),
-    FOREIGN KEY (to_address_id) REFERENCES addresses(id)
+    created_at TIMESTAMP NOT NULL
 );
 
 CREATE TABLE clusters (
@@ -50,8 +48,7 @@ CREATE TABLE clusters (
     owner_address VARCHAR,
     is_burned BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    FOREIGN KEY (owner_address) REFERENCES addresses(id)
+    updated_at TIMESTAMP NOT NULL
 );
 
 CREATE TABLE spores (
@@ -62,8 +59,5 @@ CREATE TABLE spores (
     owner_address VARCHAR,
     is_burned BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    FOREIGN KEY (owner_address) REFERENCES addresses(id),
-    FOREIGN KEY (cluster_id) REFERENCES clusters(id)
+    updated_at TIMESTAMP NOT NULL
 );
-

@@ -33,23 +33,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::addresses::Entity",
-        from = "Column::FromAddressId",
-        to = "super::addresses::Column::Id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    Addresses2,
-    #[sea_orm(
-        belongs_to = "super::addresses::Entity",
-        from = "Column::ToAddressId",
-        to = "super::addresses::Column::Id",
-        on_update = "NoAction",
-        on_delete = "NoAction"
-    )]
-    Addresses1,
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
