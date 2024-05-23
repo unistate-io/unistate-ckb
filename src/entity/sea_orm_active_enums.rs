@@ -3,14 +3,6 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
-#[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "cell_status")]
-pub enum CellStatus {
-    #[sea_orm(string_value = "dead")]
-    Dead,
-    #[sea_orm(string_value = "live")]
-    Live,
-}
-#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
 #[sea_orm(rs_type = "String", db_type = "Enum", enum_name = "spore_action_type")]
 pub enum SporeActionType {
     #[sea_orm(string_value = "BurnAgent")]

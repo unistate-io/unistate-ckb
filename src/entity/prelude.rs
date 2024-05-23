@@ -9,3 +9,4 @@ pub use super::spore_actions::Entity as SporeActions;
 pub use super::spores::Entity as Spores;
 pub use super::token_info::Entity as TokenInfo;
 pub use super::xudt_cell::Entity as XudtCell;
+pub use super::xudt_status_cell::Entity as XudtStatusCell;
