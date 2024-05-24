@@ -2,6 +2,7 @@ use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::anyhow;
+use bigdecimal::num_bigint::BigInt;
 use ckb_jsonrpc_types::{CellOutput, JsonBytes, TransactionView};
 use ckb_sdk::{util::blake160, NetworkType};
 use ckb_types::{packed, H160, H256};
@@ -15,7 +16,7 @@ use rayon::{
     prelude::IntoParallelRefIterator,
 };
 use sea_orm::{
-    prelude::{Decimal, EntityTrait as _},
+    prelude::{BigDecimal, EntityTrait as _},
     sea_query::OnConflict,
     DatabaseConnection, DbConn, DbErr, Set,
 };
@@ -157,7 +158,7 @@ async fn upsert_xudt(
         transaction_index: Set(index as i32),
         lock_id: Set(lock_id),
         type_id: Set(type_id.clone()),
-        amount: Set(Decimal::from_i128_with_scale(amount as i128, 0)),
+        amount: Set(BigDecimal::new(BigInt::from(amount), 0)),
         xudt_args: Set(xudt_args),
         xudt_data: Set(xudt_data),
         xudt_data_lock: Set(xudt_data_lock),
@@ -448,16 +449,16 @@ impl XudtIndexer {
 
         tokio::select! {
             res = xudt_task => {
-                debug!("xudt_task res: {res:?}");
+                tracing::error!("xudt_task res: {res:?}");
             }
             res = info_task => {
-                debug!("info_task res: {res:?}");
+                tracing::error!("info_task res: {res:?}");
             }
             res = status_task => {
-                debug!("status_task res: {res:?}");
+                tracing::error!("status_task res: {res:?}");
             }
             res = index_task => {
-                debug!("xudt index_task res: {res:?}");
+                tracing::error!("xudt index_task res: {res:?}");
             }
         }
 

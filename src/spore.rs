@@ -97,10 +97,10 @@ impl SporeIndexer {
 
         tokio::select! {
             res = address_task => {
-                debug!("address_task res: {res:?}");
+                tracing::error!("address_task res: {res:?}");
             }
             res = main_task => {
-                debug!("main_task res: {res:?}");
+                tracing::error!("main_task res: {res:?}");
             }
         }
 
