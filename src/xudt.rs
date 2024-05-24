@@ -235,7 +235,7 @@ fn parse_xudt(
     let (raw_onwer_lock_script_hash, raw_xudt_args) = o
         .type_
         .as_ref()
-        .map(|tp| tp.args.as_bytes().split_at(32))
+        .and_then(|tp| split_at_checked(tp.args.as_bytes(), 32))
         .unzip();
     debug!(
         "Raw owner lock script hash: {:?}",
