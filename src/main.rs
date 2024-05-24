@@ -30,6 +30,8 @@ mod spore;
 mod unique;
 mod xudt;
 
+const MB: u32 = 1048576;
+
 struct TxWithStates {
     is_spore: bool,
     is_xudt: bool,
@@ -44,12 +46,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv()?;
 
     let filter = FilterFn::new(|metadata| {
-        // Only enable spans or events with the target "interesting_things"
-        metadata.level() <= &Level::DEBUG
-            && metadata
-                .module_path()
-                .map(|p| !(p.starts_with("h2::codec") || p.starts_with("sqlx::query")))
-                .unwrap_or(true)
+        metadata.level() <= &Level::INFO && metadata.module_path().is_some()
     });
 
     let layer = tracing_subscriber::fmt::layer()
@@ -65,16 +62,11 @@ async fn main() -> anyhow::Result<()> {
     // let client =
     //     fetcher::Fetcher::http_client("http://127.0.0.1:8114", 500, 5, 104857600, 104857600)?;
     let client =
-        fetcher::Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 104857600, 104857600)?;
+        fetcher::Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 1000 * MB, 100 * MB)?;
 
     let block_height_value = block_height::Entity::find().one(&db).await?.unwrap().height as u64;
 
     let network = NetworkType::Mainnet;
-    let mut height = constants::mainnet_info::DEFAULT_START_HEIGHT.max(block_height_value);
-
-    let target = client.get_tip_block_number().await?.value();
-    let max_batch_size = 100;
-    let mut batch_size = (target - height).min(max_batch_size);
 
     let (spore_indexer, spore_sender) = spore::SporeIndexer::new(&db, network);
 
@@ -91,6 +83,13 @@ async fn main() -> anyhow::Result<()> {
 
     let (block_sender, mut block_receiver) = tokio::sync::mpsc::channel(100);
 
+    let mut height = constants::mainnet_info::DEFAULT_START_HEIGHT.max(block_height_value);
+
+    let initial_target = client.get_tip_block_number().await?.value();
+    let max_batch_size = 1000;
+    let mut batch_size = (initial_target - height).min(max_batch_size);
+    let mut target_height = initial_target;
+
     let fetch_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         loop {
             info!("height: {height}");
@@ -106,12 +105,17 @@ async fn main() -> anyhow::Result<()> {
             block_sender.send((blocks, height)).await?;
 
             height += batch_size;
-            batch_size =
-                (client.get_tip_block_number().await?.value() - height).min(max_batch_size);
+            batch_size = (target_height - height).min(max_batch_size);
 
             if batch_size == 0 {
-                info!("sleeping...");
-                tokio::time::sleep(Duration::from_secs(6)).await;
+                let new_target = client.get_tip_block_number().await?.value();
+                if new_target != target_height {
+                    target_height = new_target;
+                    batch_size = (target_height - height).min(max_batch_size);
+                } else {
+                    info!("sleeping...");
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                }
             }
         }
     });
@@ -226,19 +230,19 @@ async fn main() -> anyhow::Result<()> {
 
     select! {
         res = spore_task => {
-            debug!("spore res: {res:?}");
+            tracing::error!("spore res: {res:?}");
         }
         res = rgbpp_task => {
-            debug!("rgbpp res: {res:?}");
+            tracing::error!("rgbpp res: {res:?}");
         }
         res = xudt_task => {
-            debug!("xudt res: {res:?}");
+            tracing::error!("xudt res: {res:?}");
         }
         res = fetch_task => {
-            debug!("featch res: {res:?}");
+            tracing::error!("featch res: {res:?}");
         }
         res = process_task => {
-            debug!("process res: {res:?}");
+            tracing::error!("process res: {res:?}");
         }
     }
 
