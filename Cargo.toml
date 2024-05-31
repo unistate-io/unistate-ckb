@@ -25,8 +25,6 @@ sea-orm = { version = "1.0.0-rc.4", features = [
 ], default-features = false }
 bigdecimal = "0.3" # 为了 sea-orm 兼容性
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-futures = "0.3"
 chrono = { version = "0.4.38", features = ["serde"] }
 sha3 = "0.10.8"
 rayon = "1"
