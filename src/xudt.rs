@@ -1,12 +1,9 @@
-use core::time::Duration;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use anyhow::anyhow;
 use bigdecimal::num_bigint::BigInt;
 use ckb_jsonrpc_types::{CellOutput, JsonBytes, TransactionView};
 use ckb_sdk::{util::blake160, NetworkType};
 use ckb_types::{packed, H160, H256};
-use futures::future::join_all;
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
@@ -15,21 +12,14 @@ use rayon::{
     iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
     prelude::IntoParallelRefIterator,
 };
-use sea_orm::{
-    prelude::{BigDecimal, EntityTrait as _},
-    sea_query::OnConflict,
-    DatabaseConnection, DbConn, DbErr, Set,
-};
-use tokio::{
-    sync::mpsc::{self, Sender},
-    time::{self, sleep},
-};
-use tokio_stream::{wrappers::ReceiverStream, StreamExt};
+use sea_orm::{prelude::BigDecimal, Set};
+use tokio::sync::mpsc::{self};
 use tracing::debug;
 
 use crate::{
     constants::mainnet_info::{UNIQUE_TYPE_SCRIPT, XUDTTYPE_SCRIPT},
-    entity::{addresses, token_info, xudt_cell, xudt_status_cell},
+    database::Operations,
+    entity::{token_info, xudt_cell, xudt_status_cell},
     schemas::{
         action, blockchain,
         xudt_rce::{self, ScriptVec, XudtData},
@@ -89,13 +79,12 @@ struct InputOutPoint {
     index: usize,
 }
 
-async fn upsert_xudt(
+fn upsert_xudt(
     xudt: Xudt,
     network: ckb_sdk::NetworkType,
     tx_hash: H256,
     index: usize,
-    sender: mpsc::Sender<xudt_cell::ActiveModel>,
-    address_sender: mpsc::Sender<addresses::ActiveModel>,
+    op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<String> {
     let Xudt {
         amount,
@@ -113,18 +102,16 @@ async fn upsert_xudt(
             packed::Script::from(type_script).as_bytes(),
         )),
         network,
-        address_sender.clone(),
-    )
-    .await?;
+        op_sender.clone(),
+    )?;
 
     let lock_id = crate::spore::upsert_address(
         &action::AddressUnion::Script(action::Script::new_unchecked(
             packed::Script::from(lock_script).as_bytes(),
         )),
         network,
-        address_sender.clone(),
-    )
-    .await?;
+        op_sender.clone(),
+    )?;
 
     let xudt_args = if let Some(args) = xudt_args {
         let mut address = Vec::new();
@@ -132,7 +119,7 @@ async fn upsert_xudt(
             .into_iter()
             .map(|arg| action::AddressUnion::Script(action::Script::new_unchecked(arg.as_bytes())))
         {
-            let addr = crate::spore::upsert_address(&arg, network, address_sender.clone()).await?;
+            let addr = crate::spore::upsert_address(&arg, network, op_sender.clone())?;
             address.push(addr);
         }
         Some(address)
@@ -165,16 +152,16 @@ async fn upsert_xudt(
         xudt_owner_lock_script_hash: Set(xudt_owner_lock_script_hash),
     };
 
-    sender.send(xudt_cell).await?;
+    op_sender.send(Operations::UpsertXudt(xudt_cell))?;
 
     Ok(type_id)
 }
 
-async fn update_xudt(
+fn update_xudt(
     tx_hash: H256,
     index: usize,
     out_point: InputOutPoint,
-    sender: mpsc::Sender<xudt_status_cell::ActiveModel>,
+    op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     let xudt_cell = xudt_status_cell::ActiveModel {
         transaction_hash: Set(tx_hash.0.to_vec()),
@@ -183,17 +170,17 @@ async fn update_xudt(
         input_transaction_hash: Set(Some(out_point.hash.0.to_vec())),
     };
 
-    sender.send(xudt_cell).await?;
+    op_sender.send(Operations::UpdateXudt(xudt_cell))?;
 
     Ok(())
 }
 
-async fn upsert_token_info(
+fn upsert_token_info(
     token_info: TokenInfo,
     tx_hash: H256,
     index: usize,
     type_id: String,
-    sender: mpsc::Sender<token_info::ActiveModel>,
+    op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     let TokenInfo {
         decimal,
@@ -210,7 +197,7 @@ async fn upsert_token_info(
         type_id: Set(type_id),
     };
 
-    sender.send(token_info).await?;
+    op_sender.send(Operations::UpsertTokenInfo(token_info))?;
 
     Ok(())
 }
@@ -305,227 +292,35 @@ pub struct XudtTx {
 }
 
 pub struct XudtIndexer {
-    db: DatabaseConnection,
-    stream: ReceiverStream<XudtTx>,
+    txs: Vec<XudtTx>,
     network: NetworkType,
-    address_sender: mpsc::Sender<addresses::ActiveModel>,
+    op_sender: mpsc::UnboundedSender<Operations>,
 }
 
 impl XudtIndexer {
     pub fn new(
-        db: &DatabaseConnection,
+        txs: Vec<XudtTx>,
         network: NetworkType,
-        address_sender: mpsc::Sender<addresses::ActiveModel>,
-    ) -> (Self, Sender<XudtTx>) {
-        let (tx, rx) = mpsc::channel(10000);
-        (
-            Self {
-                db: db.clone(),
-                stream: ReceiverStream::new(rx),
-                network,
-                address_sender,
-            },
-            tx,
-        )
+        op_sender: mpsc::UnboundedSender<Operations>,
+    ) -> Self {
+        Self {
+            txs,
+            network,
+            op_sender,
+        }
     }
 
-    pub async fn index(self) -> Result<(), anyhow::Error> {
+    pub fn index(self) -> Result<(), anyhow::Error> {
         let Self {
-            db,
-            mut stream,
+            txs,
             network,
-            address_sender,
+            op_sender,
         } = self;
 
-        let (xudt_tx, mut xudt_rx) = mpsc::channel(100);
-        let xudt_db = db.clone();
-        let xudt_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let mut interval = time::interval(Duration::from_secs(30));
-            loop {
-                tokio::select! {
-                    Some(msg) = xudt_rx.recv() => {
-                        buffer.push(msg);
-                        if buffer.len() > 100 {
-                            upsert_many_xudt(&mut buffer, &xudt_db).await?;
-                            interval.reset();
-                        }
-                    }
-                    _ =  interval.tick() => {
-                        if !buffer.is_empty() {
-                            upsert_many_xudt(&mut buffer, &xudt_db).await?;
-                        }
-                    }
-                }
-            }
-        });
-
-        let (info_tx, mut info_rx) = mpsc::channel(100);
-
-        let info_db = db.clone();
-        let info_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let mut interval = time::interval(Duration::from_secs(30));
-            loop {
-                tokio::select! {
-                    Some(msg) = info_rx.recv() => {
-                        buffer.push(msg);
-                        if buffer.len() > 100 {
-                            upsert_many_info(&mut buffer, &info_db).await?;
-                        }
-                    }
-                    _ =  interval.tick() => {
-                        if !buffer.is_empty() {
-                            upsert_many_info(&mut buffer, &info_db).await?;
-                        }
-                    }
-                }
-            }
-        });
-
-        let (status_tx, mut status_rx) = mpsc::channel(100);
-
-        let status_db = db.clone();
-        let status_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let mut interval = time::interval(Duration::from_secs(30));
-            loop {
-                tokio::select! {
-                    Some(msg) =status_rx.recv() => {
-                        buffer.push(msg);
-                        if buffer.len() > 100 {
-                            upsert_many_status(&mut buffer, &status_db).await?;
-                        }
-                    }
-                    _ =  interval.tick() => {
-                        if !buffer.is_empty() {
-                            upsert_many_status(&mut buffer, &status_db).await?;
-                        }
-                    }
-                }
-            }
-        });
-
-        let index_task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            loop {
-                if let Some(XudtTx { tx }) = stream.next().await {
-                    let db = db.clone();
-                    let info_tx = info_tx.clone();
-                    let xudt_tx = xudt_tx.clone();
-                    let status_tx = status_tx.clone();
-                    let address_sender = address_sender.clone();
-                    let task: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-                        if let Err(e) =
-                            index_xudt(tx, network, info_tx, xudt_tx, status_tx, address_sender)
-                                .await
-                        {
-                            tracing::error!("index xudt error: {e:?}");
-                        }
-                    });
-                    buffer.push(task);
-                    if buffer.len() > 1000 {
-                        if let Some(res) = join_all(buffer.drain(..))
-                            .await
-                            .into_par_iter()
-                            .find_any(|p| p.is_err())
-                        {
-                            res?;
-                        }
-                    }
-                } else {
-                    if buffer.is_empty() {
-                        sleep(Duration::from_secs(2)).await;
-                    } else if let Some(res) = join_all(buffer.drain(..))
-                        .await
-                        .into_par_iter()
-                        .find_any(|p| p.is_err())
-                    {
-                        res?;
-                    }
-                }
-            }
-        });
-
-        tokio::select! {
-            res = xudt_task => {
-                tracing::error!("xudt_task res: {res:?}");
-            }
-            res = info_task => {
-                tracing::error!("info_task res: {res:?}");
-            }
-            res = status_task => {
-                tracing::error!("status_task res: {res:?}");
-            }
-            res = index_task => {
-                tracing::error!("xudt index_task res: {res:?}");
-            }
-        }
+        txs.into_par_iter()
+            .try_for_each(|tx| index_xudt(tx.tx, network, op_sender.clone()))?;
 
         Ok(())
-    }
-}
-
-async fn upsert_many_xudt(
-    buffer: &mut Vec<xudt_cell::ActiveModel>,
-    xudt_db: &DbConn,
-) -> Result<(), anyhow::Error> {
-    match xudt_cell::Entity::insert_many(buffer.drain(..))
-        .on_conflict(
-            OnConflict::columns([
-                xudt_cell::Column::TransactionHash,
-                xudt_cell::Column::TransactionIndex,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(xudt_db)
-        .await
-    {
-        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-async fn upsert_many_info(
-    buffer: &mut Vec<token_info::ActiveModel>,
-    info_db: &DbConn,
-) -> Result<(), anyhow::Error> {
-    match token_info::Entity::insert_many(buffer.drain(..))
-        .on_conflict(
-            OnConflict::columns([
-                token_info::Column::TransactionHash,
-                token_info::Column::TransactionIndex,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(info_db)
-        .await
-    {
-        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-async fn upsert_many_status(
-    buffer: &mut Vec<xudt_status_cell::ActiveModel>,
-    status_db: &DbConn,
-) -> Result<(), anyhow::Error> {
-    match xudt_status_cell::Entity::insert_many(buffer.drain(..))
-        .on_conflict(
-            OnConflict::columns([
-                xudt_status_cell::Column::TransactionHash,
-                xudt_status_cell::Column::TransactionIndex,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(status_db)
-        .await
-    {
-        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-        Err(e) => Err(e.into()),
     }
 }
 
@@ -534,13 +329,10 @@ enum XudtParseResult {
     Xudt(Xudt),
 }
 
-async fn index_xudt(
+fn index_xudt(
     tx: TransactionView,
     network: NetworkType,
-    info_sender: mpsc::Sender<token_info::ActiveModel>,
-    xudt_sender: mpsc::Sender<xudt_cell::ActiveModel>,
-    status_sender: mpsc::Sender<xudt_status_cell::ActiveModel>,
-    address_sender: mpsc::Sender<addresses::ActiveModel>,
+    op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     debug!("Indexing transaction: {:?}", tx);
 
@@ -549,11 +341,8 @@ async fn index_xudt(
 
     let xudt_witness_output = process_witnesses::<false>(&tx);
     debug!("XudtWitnessOutput: {:?}", xudt_witness_output);
-    let mut infos = Vec::new();
-    let mut xudt_type_ids = HashSet::new();
 
-    for (xudt, index) in tx
-        .inner
+    tx.inner
         .outputs
         .into_par_iter()
         .zip(tx.inner.outputs_data.into_par_iter())
@@ -591,58 +380,45 @@ async fn index_xudt(
                 None
             }
         })
-        .collect::<Vec<_>>()
-    {
-        match xudt {
-            XudtParseResult::XudtInfo(info) => {
-                infos.push((info, index));
-            }
-            XudtParseResult::Xudt(xudt) => {
-                let xudt_type_id = upsert_xudt(
-                    xudt,
-                    network,
-                    tx.hash.clone(),
-                    index,
-                    xudt_sender.clone(),
-                    address_sender.clone(),
-                )
-                .await?;
-                xudt_type_ids.insert(xudt_type_id);
-            }
-        }
-    }
-
-    for (info, index) in infos {
-        let type_id = xudt_type_ids
-            .iter()
-            .next()
-            .ok_or(anyhow!("Not found type id."))?;
-
-        upsert_token_info(
-            info,
-            tx.hash.clone(),
-            index,
-            type_id.clone(),
-            info_sender.clone(),
-        )
-        .await?;
-    }
-
-    for (input_index, input) in tx.inner.inputs.into_iter().enumerate() {
-        let tx_hash = input.previous_output.tx_hash.clone();
-        let index = input.previous_output.index.value() as usize;
-
-        update_xudt(
-            tx_hash,
-            index,
-            InputOutPoint {
-                hash: tx.hash.clone(),
-                index: input_index,
+        .try_for_each_init(
+            || (None, None),
+            |(info_op, type_id_op), (xudt, index)| -> anyhow::Result<()> {
+                match xudt {
+                    XudtParseResult::XudtInfo(info) => {
+                        *info_op = Some(info);
+                    }
+                    XudtParseResult::Xudt(xudt) => {
+                        let xudt_type_id =
+                            upsert_xudt(xudt, network, tx.hash.clone(), index, op_sender.clone())?;
+                        *type_id_op = Some(xudt_type_id);
+                    }
+                }
+                if info_op.is_some() && type_id_op.is_some() {
+                    let info = info_op.take().unwrap();
+                    let type_id = type_id_op.take().unwrap();
+                    upsert_token_info(info, tx.hash.clone(), index, type_id, op_sender.clone())?;
+                }
+                Ok(())
             },
-            status_sender.clone(),
-        )
-        .await?;
-    }
+        )?;
+
+    tx.inner.inputs.into_par_iter().enumerate().try_for_each(
+        |(input_index, input)| -> anyhow::Result<()> {
+            let tx_hash = input.previous_output.tx_hash.clone();
+            let index = input.previous_output.index.value() as usize;
+
+            update_xudt(
+                tx_hash,
+                index,
+                InputOutPoint {
+                    hash: tx.hash.clone(),
+                    index: input_index,
+                },
+                op_sender.clone(),
+            )?;
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }

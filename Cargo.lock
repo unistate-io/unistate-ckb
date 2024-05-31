@@ -3792,7 +3792,6 @@ dependencies = [
  "ckb-sdk",
  "ckb-types",
  "dotenvy",
- "futures",
  "hex",
  "hex-literal",
  "jsonrpsee",
@@ -3804,7 +3803,6 @@ dependencies = [
  "sha3",
  "thiserror",
  "tokio",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
 ]

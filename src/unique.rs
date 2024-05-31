@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(result.ok(), Some(expected));
 
         let res = decode_token_info_bytes(&hex_literal::hex!("0805436c6f776e05436c6f776e")[..]);
-        
+
         println!("{res:?}");
     }
 
