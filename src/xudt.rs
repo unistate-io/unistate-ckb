@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{self};
 use tracing::debug;
 
 use crate::{
-    constants::mainnet_info::{UNIQUE_TYPE_SCRIPT, XUDTTYPE_SCRIPT},
+    constants::Constants,
     database::Operations,
     entity::{token_info, xudt_cell, xudt_status_cell},
     schemas::{
@@ -150,6 +150,7 @@ fn upsert_xudt(
         xudt_data: Set(xudt_data),
         xudt_data_lock: Set(xudt_data_lock),
         xudt_owner_lock_script_hash: Set(xudt_owner_lock_script_hash),
+        is_consumed: Set(false),
     };
 
     op_sender.send(Operations::UpsertXudt(xudt_cell))?;
@@ -316,9 +317,10 @@ impl XudtIndexer {
             network,
             op_sender,
         } = self;
+        let constants = Constants::from_config(network);
 
         txs.into_par_iter()
-            .try_for_each(|tx| index_xudt(tx.tx, network, op_sender.clone()))?;
+            .try_for_each(|tx| index_xudt(tx.tx, network, constants, op_sender.clone()))?;
 
         Ok(())
     }
@@ -332,6 +334,7 @@ enum XudtParseResult {
 fn index_xudt(
     tx: TransactionView,
     network: NetworkType,
+    constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     debug!("Indexing transaction: {:?}", tx);
@@ -353,7 +356,7 @@ fn index_xudt(
             if p.0
                 .type_
                 .as_ref()
-                .map(|t| XUDTTYPE_SCRIPT.code_hash.eq(&t.code_hash))
+                .map(|t| constants.xudttype_script().code_hash.eq(&t.code_hash))
                 .unwrap_or(false)
             {
                 debug!("Output is XUDT type");
@@ -363,7 +366,7 @@ fn index_xudt(
                 .0
                 .type_
                 .as_ref()
-                .map(|t| UNIQUE_TYPE_SCRIPT.code_hash.eq(&t.code_hash))
+                .map(|t| constants.unique_type_script().code_hash.eq(&t.code_hash))
                 .unwrap_or(false)
             {
                 debug!("Output is UNIQUE type");

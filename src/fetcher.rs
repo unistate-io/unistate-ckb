@@ -17,7 +17,7 @@ use jsonrpsee::{
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use tracing::debug;
 
-use crate::error::Error;
+use crate::{error::Error, MB};
 
 #[derive(Debug, Clone)]
 pub struct Fetcher<C> {
@@ -119,6 +119,17 @@ where
 }
 
 impl Fetcher<HttpClient> {
+    pub fn from_config(config: &crate::config::UnistateConfig) -> Result<Self, Error> {
+        let fetcher = &config.featcher;
+        let url = &config.url;
+        Self::http_client(
+            url,
+            fetcher.retry_interval,
+            fetcher.max_retries,
+            fetcher.max_response_size * MB,
+            fetcher.max_request_size * MB,
+        )
+    }
     pub fn http_client(
         url: impl AsRef<str>,
         retry_interval: u64,

@@ -1,10 +1,13 @@
 use core::time::Duration;
-use std::env;
 
 use ckb_jsonrpc_types::{BlockNumber, TransactionView};
-use ckb_sdk::NetworkType;
 
+use config::Config;
 use database::DatabaseProcessor;
+use figment::{
+    providers::{Format as _, Toml},
+    Figment,
+};
 use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, ParallelExtend, ParallelIterator,
 };
@@ -12,17 +15,15 @@ use sea_orm::{ConnectOptions, Database, EntityTrait};
 
 use spore::SporeTx;
 use tokio::task::JoinHandle;
-use tracing::{info, Level};
+use tracing::info;
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
 };
 use xudt::XudtTx;
 
-use crate::constants::mainnet_info::{
-    CLUSTER_TYPE_DEP, RGBPP_LOCK_DEP, SPORE_TYPE_DEP, XUDTTYPE_DEP,
-};
 use entity::block_height;
 
+mod config;
 mod constants;
 mod database;
 mod entity;
@@ -63,8 +64,15 @@ impl CategorizedTxs {
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv()?;
 
-    let filter = FilterFn::new(|metadata| {
-        metadata.level() <= &Level::INFO && metadata.module_path().is_some()
+    let config: Config = Figment::new()
+        .join(Toml::file("unistate.toml"))
+        .merge(figment::providers::Env::raw().only(&["DATABASE_URL"]))
+        .extract()?;
+
+    let config_level: tracing::Level = config.unistate.optional_config.level.into();
+
+    let filter = FilterFn::new(move |metadata| {
+        metadata.level() <= &config_level && metadata.module_path().is_some()
     });
 
     let layer = tracing_subscriber::fmt::layer()
@@ -75,27 +83,32 @@ async fn main() -> anyhow::Result<()> {
         .with(layer.with_filter(filter))
         .init();
 
-    let opt = ConnectOptions::new(env::var("DATABASE_URL")?);
+    info!("config: {config:#?}");
+
+    let opt = ConnectOptions::new(&config.database_url);
     let db = Database::connect(opt).await?;
-    // let client =
-    //     fetcher::Fetcher::http_client("http://127.0.0.1:8114", 500, 5, 104857600, 104857600)?;
-    let client =
-        fetcher::Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 1000 * MB, 100 * MB)?;
+
+    let client = fetcher::Fetcher::from_config(&config.unistate)?;
 
     let block_height_value = block_height::Entity::find().one(&db).await?.unwrap().height as u64;
+    let network = config.unistate.optional_config.network;
+    let constants = constants::Constants::from_config(network);
 
-    let network = NetworkType::Mainnet;
-
-    let mut height = constants::mainnet_info::DEFAULT_START_HEIGHT.max(block_height_value);
+    let mut height = config
+        .unistate
+        .optional_config
+        .initial_height
+        .max(block_height_value);
 
     let initial_target = client.get_tip_block_number().await?.value();
-    let max_batch_size = 1000;
+    let max_batch_size = config.unistate.optional_config.batch_size;
+    let interval = config.unistate.optional_config.interval;
     let mut batch_size = (initial_target - height).min(max_batch_size);
     let mut target_height = initial_target;
     let mut pre_handle = None;
 
     loop {
-        info!("height: {height}");
+        info!("Fetching batch: {batch_size} items | Progress: {height}/{target_height}");
 
         let numbers = (0..batch_size)
             .into_par_iter()
@@ -107,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
         let blocks = client.get_blocks(numbers).await?;
 
-        let (database_processor, op_sender, height_sender) = DatabaseProcessor::new(db.clone());
+        let (database_processor, op_sender, commited) = DatabaseProcessor::new(db.clone(), height);
 
         let processor_handle = tokio::spawn(database_processor.handle());
 
@@ -118,43 +131,43 @@ async fn main() -> anyhow::Result<()> {
             let categorized_txs = blocks
                 .into_par_iter()
                 .fold(CategorizedTxs::new, |acc, block| {
-                    let new = block
-                        .transactions
-                        .into_par_iter()
-                        .fold(CategorizedTxs::new, move |mut categorized, tx| {
-                            let rgbpp = tx
-                                .inner
-                                .cell_deps
-                                .par_iter()
-                                .any(|cd| RGBPP_LOCK_DEP.out_point.eq(&cd.out_point));
-
-                            let spore = tx.inner.cell_deps.par_iter().any(|cd| {
-                                SPORE_TYPE_DEP.out_point.eq(&cd.out_point)
-                                    || CLUSTER_TYPE_DEP.out_point.eq(&cd.out_point)
-                            });
-
-                            let xudt = tx
-                                .inner
-                                .cell_deps
-                                .par_iter()
-                                .any(|cd| XUDTTYPE_DEP.out_point.eq(&cd.out_point));
-
-                            if spore {
-                                categorized.spore_txs.push(SporeTx {
-                                    tx: tx.clone(),
-                                    timestamp: block.header.inner.timestamp.value(),
+                    let new =
+                        block
+                            .transactions
+                            .into_par_iter()
+                            .fold(CategorizedTxs::new, move |mut categorized, tx| {
+                                let rgbpp = tx.inner.cell_deps.par_iter().any(|cd| {
+                                    constants.rgbpp_lock_dep().out_point.eq(&cd.out_point)
                                 });
-                            }
-                            if xudt {
-                                categorized.xudt_txs.push(XudtTx { tx: tx.clone() });
-                            }
-                            if rgbpp {
-                                categorized.rgbpp_txs.push(tx);
-                            }
 
-                            categorized
-                        })
-                        .reduce(CategorizedTxs::new, |pre, next| pre.merge(next));
+                                let spore = tx.inner.cell_deps.par_iter().any(|cd| {
+                                    constants.spore_type_dep().out_point.eq(&cd.out_point)
+                                        || constants.cluster_type_dep().out_point.eq(&cd.out_point)
+                                });
+
+                                let xudt =
+                                    tx.inner.cell_deps.par_iter().any(|cd| {
+                                        constants.xudttype_dep().out_point.eq(&cd.out_point)
+                                    });
+
+                                if spore {
+                                    categorized.spore_txs.push(SporeTx {
+                                        tx: tx.clone(),
+                                        timestamp: block.header.inner.timestamp.value(),
+                                    });
+                                }
+
+                                if xudt {
+                                    categorized.xudt_txs.push(XudtTx { tx: tx.clone() });
+                                }
+
+                                if rgbpp {
+                                    categorized.rgbpp_txs.push(tx);
+                                }
+
+                                categorized
+                            })
+                            .reduce(CategorizedTxs::new, |pre, next| pre.merge(next));
                     acc.merge(new)
                 })
                 .reduce(CategorizedTxs::new, |acc, txs| acc.merge(txs));
@@ -169,29 +182,29 @@ async fn main() -> anyhow::Result<()> {
 
             spore_idxer.index()?;
 
+            tracing::debug!("drop spore idxer");
+
             let xudt_idxer = xudt::XudtIndexer::new(xudt_txs, network, op_sender.clone());
 
             xudt_idxer.index()?;
 
-            let rgbpp_idxer = rgbpp::RgbppIndexer::new(rgbpp_txs, fetcher, op_sender.clone());
+            tracing::debug!("drop xudt idxer");
+
+            let rgbpp_idxer = rgbpp::RgbppIndexer::new(rgbpp_txs, fetcher, op_sender);
 
             rgbpp_idxer.index().await?;
 
-            if let Some(pre_handle) = pre_handle_take {
-                pre_handle.await??;
-            }
+            tracing::debug!("drop rgbpp idxer");
 
-            if height_sender
-                .send(block_height::ActiveModel {
-                    id: sea_orm::Set(1),
-                    height: sea_orm::Set(height as i64),
-                })
-                .is_err()
-            {
-                tracing::error!("send height model failed: {:?}", height)
-            };
+            commited
+                .send(pre_handle_take)
+                .map_err(|_| anyhow::anyhow!("commited failed."))?;
+
+            tracing::debug!("wait processor handle");
 
             processor_handle.await??;
+
+            tracing::debug!("drop processor handle");
 
             Ok(())
         });
@@ -205,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
                 batch_size = (target_height - height).min(max_batch_size);
             } else {
                 info!("sleeping...");
-                tokio::time::sleep(Duration::from_secs(6)).await;
+                tokio::time::sleep(Duration::from_secs_f32(interval)).await;
             }
         }
     }
