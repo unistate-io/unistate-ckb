@@ -5,4 +5,7 @@ CREATE TABLE block_height (
     CONSTRAINT single_row CHECK (id = 1)
 );
 
-INSERT INTO block_height (id, height) VALUES (1, 0);
+INSERT INTO
+    block_height (id, height)
+VALUES
+    (1, 0);
