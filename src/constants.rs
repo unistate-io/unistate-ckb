@@ -2,6 +2,7 @@
 
 use ckb_fixed_hash_core::H256;
 use ckb_jsonrpc_types::{CellDep, DepType, JsonBytes, OutPoint, Script, ScriptHashType, Uint32};
+use ckb_sdk::NetworkType;
 use ckb_types::bytes::Bytes;
 use hex_literal::hex;
 
@@ -32,149 +33,165 @@ const fn const_default_bytes() -> JsonBytes {
     unsafe { std::mem::transmute(src) }
 }
 
-macro_rules! define_deps {
-    ($($name:ident, $dep_type:expr, $dep_tx_hash:expr, $dep_index:expr);*) => {
-        $(
-            pub const $name: CellDep = CellDep {
-                dep_type: $dep_type,
-                out_point: OutPoint {
-                    tx_hash: H256(hex!($dep_tx_hash)),
-                    index: convert($dep_index),
-                }
-            };
-        )*
+macro_rules! define_dep {
+    ($dep_type:expr, $dep_tx_hash:expr, $dep_index:expr) => {
+        CellDep {
+            dep_type: $dep_type,
+            out_point: OutPoint {
+                tx_hash: H256(hex!($dep_tx_hash)),
+                index: convert($dep_index),
+            },
+        }
     };
 }
 
 macro_rules! define_script {
-    ($($name:ident, $script_code_hash:expr, $script_hash_type:expr, $script_args:expr);*) => {
-        $(
-            pub const $name: Script = Script {
-                code_hash: H256(hex!($script_code_hash)),
-                hash_type: $script_hash_type,
-                args: $script_args
-            };
-        )*
+    ($script_hash_type:expr, $script_code_hash:expr, $script_args:expr) => {
+        Script {
+            code_hash: H256(hex!($script_code_hash)),
+            hash_type: $script_hash_type,
+            args: $script_args,
+        }
     };
 }
 
-macro_rules! define_info_mod {
-    ($mod_name:ident, $start_height:expr, $secp256k1_lock_dep:expr, $rgbpp_lock_dep:expr, $rgbpp_lock_config_dep:expr, $btc_time_lock_dep:expr, $btc_time_lock_config_dep:expr, $xudttype_dep:expr, $unique_type_dep:expr, $cluster_type_dep:expr, $spore_type_dep:expr, $rgbpp_lock_script:expr, $btc_time_lock_script:expr, $xudttype_script:expr, $unique_type_script:expr, $cluster_type_script:expr, $spore_type_script:expr) => {
-        pub mod $mod_name {
-            use super::*;
-
-            pub const DEFAULT_START_HEIGHT: u64 = $start_height;
-
-            define_deps!(
-                SECP256_K1_LOCK_DEP,
-                DepType::DepGroup,
-                $secp256k1_lock_dep,
-                0x0;
-                RGBPP_LOCK_DEP,
-                DepType::Code,
-                $rgbpp_lock_dep,
-                0x0;
-                RGBPP_LOCK_CONFIG_DEP,
-                DepType::Code,
-                $rgbpp_lock_config_dep,
-                0x1;
-                BTC_TIME_LOCK_DEP,
-                DepType::Code,
-                $btc_time_lock_dep,
-                0x0;
-                BTC_TIME_LOCK_CONFIG_DEP,
-                DepType::Code,
-                $btc_time_lock_config_dep,
-                0x1;
-                XUDTTYPE_DEP,
-                DepType::Code,
-                $xudttype_dep,
-                0x0;
-                UNIQUE_TYPE_DEP,
-                DepType::Code,
-                $unique_type_dep,
-                0x0;
-                CLUSTER_TYPE_DEP,
-                DepType::Code,
-                $cluster_type_dep,
-                0x0;
-                SPORE_TYPE_DEP,
-                DepType::Code,
-                $spore_type_dep,
-                0x0
-            );
-
-            define_script!(
-                RGBPP_LOCK_SCRIPT,
-                $rgbpp_lock_script,
-                ScriptHashType::Type,
-                const_default_bytes();
-                BTC_TIME_LOCK_SCRIPT,
-                $btc_time_lock_script,
-                ScriptHashType::Type,
-                const_default_bytes();
-                XUDTTYPE_SCRIPT,
-                $xudttype_script,
-                ScriptHashType::Data1,
-                const_default_bytes();
-                UNIQUE_TYPE_SCRIPT,
-                $unique_type_script,
-                ScriptHashType::Data1,
-                const_default_bytes();
-                CLUSTER_TYPE_SCRIPT,
-                $cluster_type_script,
-                ScriptHashType::Data1,
-                const_default_bytes();
-                SPORE_TYPE_SCRIPT,
-                $spore_type_script,
-                ScriptHashType::Data1,
-                const_default_bytes()
-            );
-
-            pub fn is_rgbpp_lock_script(script: &Script) -> bool {
-                script.code_hash.eq(&RGBPP_LOCK_SCRIPT.code_hash)
-                    && script.hash_type.eq(&RGBPP_LOCK_SCRIPT.hash_type)
+macro_rules! define_network {
+    ($rt_type:ty,$name: ident,$($network:ident=>$handle:expr),*) => {
+        pub const fn $name(self) -> $rt_type {
+            match self {
+                $(Self::$network => $handle),*
             }
-
-            pub fn is_btc_time_lock_script(script: &Script) -> bool {
-                script.code_hash.eq(&BTC_TIME_LOCK_SCRIPT.code_hash)
-                    && script.hash_type.eq(&BTC_TIME_LOCK_SCRIPT.hash_type)
+        }
+    };
+    ($rt_type:ty,$name: ident,$script:ty,$($network:ident=>$handle:expr),*) => {
+        pub const fn $name(self,script:$script) -> $rt_type {
+            match self {
+                $(Self::$network => $handle),*
             }
+        }
+    };
+}
+macro_rules! define_info {
+    ($($network_name:ident, $secp256k1_lock_dep:expr, $rgbpp_lock_dep:expr, $rgbpp_lock_config_dep:expr, $btc_time_lock_dep:expr, $btc_time_lock_config_dep:expr, $xudttype_dep:expr, $unique_type_dep:expr, $cluster_type_dep:expr, $spore_type_dep:expr, $rgbpp_lock_script:expr, $btc_time_lock_script:expr, $xudttype_script:expr, $unique_type_script:expr, $cluster_type_script:expr, $spore_type_script:expr);*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Constants {
+            $($network_name),*
+        }
 
-            pub fn get_xudttype_script(script: Option<&Script>) -> Option<&Script> {
-                script.filter(|script| {
-                    script.code_hash.eq(&XUDTTYPE_SCRIPT.code_hash)
-                        && script.hash_type.eq(&XUDTTYPE_SCRIPT.hash_type)
-                })
-            }
-
-            pub fn get_unique_type_script(script: Option<&Script>) -> Option<&Script> {
-                script.filter(|script| {
-                    script.code_hash.eq(&UNIQUE_TYPE_SCRIPT.code_hash)
-                    && script.hash_type.eq(&UNIQUE_TYPE_SCRIPT.hash_type)
-                })
-            }
-
-            pub fn get_cluster_type_script(script: Option<&Script>) -> Option<&Script> {
-                script.filter(|script| {
-                    script.code_hash.eq(&CLUSTER_TYPE_SCRIPT.code_hash)
-                    && script.hash_type.eq(&CLUSTER_TYPE_SCRIPT.hash_type)
-                })
-            }
-
-            pub fn get_spore_type_script(script: Option<&Script>) -> Option<&Script> {
-                script.filter(|script| {
-                    script.code_hash.eq(&SPORE_TYPE_SCRIPT.code_hash)
-                    && script.hash_type.eq(&SPORE_TYPE_SCRIPT.hash_type)
-                })
-            }
+        impl Constants {
+            define_network!(
+                CellDep,
+                secp256k1_lock_dep,
+                $($network_name => define_dep!(DepType::DepGroup, $secp256k1_lock_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                rgbpp_lock_dep,
+                $($network_name => define_dep!(DepType::Code, $rgbpp_lock_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                rgbpp_lock_config_dep,
+                $($network_name => define_dep!(DepType::Code, $rgbpp_lock_config_dep, 0x1)),*);
+            define_network!(
+                CellDep,
+                btc_time_lock_dep,
+                $($network_name => define_dep!(DepType::Code, $btc_time_lock_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                btc_time_lock_config_dep,
+                $($network_name => define_dep!(DepType::Code, $btc_time_lock_config_dep, 0x1)),*);
+            define_network!(
+                CellDep,
+                xudttype_dep,
+                $($network_name => define_dep!(DepType::Code, $xudttype_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                unique_type_dep,
+                $($network_name => define_dep!(DepType::Code, $unique_type_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                cluster_type_dep,
+                $($network_name => define_dep!(DepType::Code, $cluster_type_dep, 0x0)),*);
+            define_network!(
+                CellDep,
+                spore_type_dep,
+                $($network_name => define_dep!(DepType::Code, $spore_type_dep, 0x0)),*);
+            define_network!(
+                Script,
+                rgbpp_lock_script,
+                $($network_name => define_script!(ScriptHashType::Type, $rgbpp_lock_script, const_default_bytes())),*);
+            define_network!(
+                Script,
+                btc_time_lock_script,
+                $($network_name => define_script!(ScriptHashType::Type, $btc_time_lock_script, const_default_bytes())),*);
+            define_network!(
+                Script,
+                xudttype_script,
+                $($network_name => define_script!(ScriptHashType::Data1, $xudttype_script, const_default_bytes())),*);
+            define_network!(
+                Script,
+                unique_type_script,
+                $($network_name => define_script!(ScriptHashType::Data1, $unique_type_script, const_default_bytes())),*);
+            define_network!(
+                Script,
+                cluster_type_script,
+                $($network_name => define_script!(ScriptHashType::Data1, $cluster_type_script, const_default_bytes())),*);
+            define_network!(
+                Script,
+                spore_type_script,
+                $($network_name => define_script!(ScriptHashType::Data1, $spore_type_script, const_default_bytes())),*);
         }
     }
 }
 
-define_info_mod! {
-    testnet_info,
-    12720832,
+impl Constants {
+    pub fn from_config(network: NetworkType) -> Self {
+        match network {
+            NetworkType::Mainnet => Self::Mainnet,
+            NetworkType::Testnet => Self::Testnet,
+            _ => unimplemented!(),
+        }
+    }
+    pub fn is_rgbpp_lock_script(self, script: &Script) -> bool {
+        script.code_hash.eq(&self.rgbpp_lock_script().code_hash)
+            && script.hash_type.eq(&self.rgbpp_lock_script().hash_type)
+    }
+
+    pub fn is_btc_time_lock_script(self, script: &Script) -> bool {
+        script.code_hash.eq(&self.btc_time_lock_script().code_hash)
+            && script.hash_type.eq(&self.btc_time_lock_script().hash_type)
+    }
+
+    pub fn get_xudttype_script(self, script: Option<&Script>) -> Option<&Script> {
+        script.filter(|script| {
+            script.code_hash.eq(&self.xudttype_script().code_hash)
+                && script.hash_type.eq(&self.xudttype_script().hash_type)
+        })
+    }
+
+    pub fn get_unique_type_script(self, script: Option<&Script>) -> Option<&Script> {
+        script.filter(|script| {
+            script.code_hash.eq(&self.unique_type_script().code_hash)
+                && script.hash_type.eq(&self.unique_type_script().hash_type)
+        })
+    }
+
+    pub fn get_cluster_type_script(self, script: Option<&Script>) -> Option<&Script> {
+        script.filter(|script| {
+            script.code_hash.eq(&self.cluster_type_script().code_hash)
+                && script.hash_type.eq(&self.cluster_type_script().hash_type)
+        })
+    }
+
+    pub fn get_spore_type_script(self, script: Option<&Script>) -> Option<&Script> {
+        script.filter(|script| {
+            script.code_hash.eq(&self.spore_type_script().code_hash)
+                && script.hash_type.eq(&self.spore_type_script().hash_type)
+        })
+    }
+}
+
+define_info! {
+    Testnet,
     // Secp256k1LockDep
     "f8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37",
     // RgbppLockDep
@@ -204,12 +221,9 @@ define_info_mod! {
     // ClusterTypeScript
     "0bbe768b519d8ea7b96d58f1182eb7e6ef96c541fbd9526975077ee09f049058",
     // SporeTypeScript
-    "685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d"
-}
-
-define_info_mod! {
-    mainnet_info,
-    11922670,
+    "685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d";
+    // 主网
+    Mainnet,
     // Secp256k1LockDep
     "71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c",
     // RgbppLockDep
