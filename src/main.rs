@@ -14,7 +14,7 @@ use rayon::iter::{
 use sea_orm::{ConnectOptions, Database, EntityTrait};
 
 use spore::SporeTx;
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tracing::info;
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
@@ -106,7 +106,8 @@ async fn main() -> anyhow::Result<()> {
     let mut batch_size = (initial_target - height).min(max_batch_size);
     let mut target_height = initial_target;
     let mut pre_handle = None;
-
+    let mut handles = JoinSet::new();
+    let fetch_size = config.unistate.optional_config.fetch_size;
     loop {
         info!("Fetching batch: {batch_size} items | Progress: {height}/{target_height}");
 
@@ -127,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
         let fetcher = client.clone();
 
         let pre_handle_take = pre_handle.take();
-        let main_handle: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        handles.spawn(async move {
             let categorized_txs = blocks
                 .into_par_iter()
                 .fold(CategorizedTxs::new, |acc, block| {
@@ -196,20 +197,30 @@ async fn main() -> anyhow::Result<()> {
 
             tracing::debug!("drop rgbpp idxer");
 
+            if let Some(pre) = pre_handle_take {
+                pre.await??;
+            }
+
             commited
-                .send(pre_handle_take)
+                .send(())
                 .map_err(|_| anyhow::anyhow!("commited failed."))?;
 
-            tracing::debug!("wait processor handle");
-
-            processor_handle.await??;
-
-            tracing::debug!("drop processor handle");
-
-            Ok(())
+            Result::<(), anyhow::Error>::Ok(())
         });
 
-        pre_handle = Some(main_handle);
+        pre_handle = Some(processor_handle);
+
+        while let Some(res) = handles.try_join_next() {
+            res??;
+        }
+
+        let pre_handle_len = handles.len();
+
+        if pre_handle_len >= fetch_size {
+            if let Some(res) = handles.join_next().await {
+                res??;
+            }
+        }
 
         if batch_size == 0 {
             let new_target = client.get_tip_block_number().await?.value();
