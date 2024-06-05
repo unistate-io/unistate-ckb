@@ -1,10 +1,7 @@
 use sea_orm::{
     sea_query::OnConflict, ActiveModelTrait, DbConn, DbErr, EntityTrait as _, TransactionTrait,
 };
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::entity::{
     addresses, block_height, clusters, rgbpp_locks, rgbpp_unlocks, spore_actions, spores,
@@ -14,7 +11,7 @@ use crate::entity::{
 pub struct DatabaseProcessor {
     pub recv: mpsc::UnboundedReceiver<Operations>,
     pub height: u64,
-    pub commited: oneshot::Receiver<Option<JoinHandle<anyhow::Result<()>>>>,
+    pub commited: oneshot::Receiver<()>,
     pub db: DbConn,
 }
 
@@ -241,28 +238,81 @@ define_upsert_function!(
 );
 
 macro_rules! process_operations {
-    ($recv:expr, $db:expr,$(($variant:ident, $vec:ident, $upsert_fn:ident)),*) => {
+    ($commited:expr, $height:expr, $db:expr, $recv:expr, $( $stage:expr => { $( $variant:ident => ($vec:ident, $upsert_fn:ident) ),* } ),*) => {
         {
+            use std::time::Instant;
+            use futures::StreamExt;
+
             $(
-                let mut $vec = Vec::new();
+                $(
+                    let mut $vec = Vec::new();
+                )*
             )*
 
+            let recv_start = Instant::now();
+            let mut sum = 0;
             while let Some(op) = $recv.recv().await {
+                sum += 1;
                 match op {
                     $(
-                        Operations::$variant(data) => $vec.push(data),
+                        $(
+                            Operations::$variant(data) => $vec.push(data),
+                        )*
                     )*
                 }
             }
+            let recv_duration = recv_start.elapsed();
+            tracing::debug!("Receiving {sum} Operations took: {:?}", recv_duration);
 
-            tracing::debug!("all recv...");
+            $commited.await?;
+
+            let handle_start = Instant::now();
+
+            let txn = $db.begin().await?;
 
             $(
-                if let Err(e) = $upsert_fn($vec, $db).await {
-                    tracing::error!("Failed to upsert {}: {:?}", stringify!($variant), e);
-                    return Err(e.into());
+                let stage_start = Instant::now();
+
+                let (mut scope,_) =  unsafe {
+                    async_scoped::TokioScope::scope(|scope| {
+                        let txnr = &txn;
+                        $(
+                            if !$vec.is_empty() {
+                                scope.spawn(async move {
+                                    $upsert_fn($vec, &txnr).await.map_err(|e| {
+                                        tracing::error!("Failed to upsert {}: {:?}", stringify!($variant), e);
+                                        e
+                                    })
+                                });
+                            }
+                        )*
+                    })
+                };
+
+
+                while let Some(result) = scope.next().await {
+                    result??;
                 }
+
+                drop(scope);
+
+                let stage_duration = stage_start.elapsed();
+                tracing::debug!("Stage {} took: {:?}", $stage, stage_duration);
             )*
+
+            // 更新区块高度
+            block_height::ActiveModel {
+                id: sea_orm::Set(1),
+                height: sea_orm::Set($height as i64),
+            }
+            .update(&txn)
+            .await?;
+
+            tracing::debug!("committing {} ...", $height);
+            txn.commit().await?;
+
+            let db_duration = Instant::now().duration_since(handle_start);
+            tracing::info!("Processed a total of {sum} database operations. Execution time: {:?}", db_duration);
         }
     };
 }
@@ -271,11 +321,7 @@ impl DatabaseProcessor {
     pub fn new(
         db: DbConn,
         height: u64,
-    ) -> (
-        Self,
-        mpsc::UnboundedSender<Operations>,
-        oneshot::Sender<Option<JoinHandle<anyhow::Result<()>>>>,
-    ) {
+    ) -> (Self, mpsc::UnboundedSender<Operations>, oneshot::Sender<()>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = oneshot::channel();
         (
@@ -297,40 +343,32 @@ impl DatabaseProcessor {
             height,
             commited,
         } = self;
-        let txn = db.begin().await?;
-
-        tracing::debug!("begin handle");
 
         process_operations! {
+            commited,
+            height,
+            db,
             recv,
-            &txn,
-            (UpsertAddress, address_vec, upsert_many_addresses),
-            (UpsertTokenInfo, token_info_vec, upsert_many_info),
-            (UpsertXudt, xudt_vec, upsert_many_xudt),
-            (UpdateXudt, status_vec, upsert_many_status),
-            (UpsertCluster, cluster_vec, upsert_many_clusters),
-            (UpsertSpores, spores_vec, upsert_many_spores),
-            (UpsertActions, actions_vec, upsert_many_actions),
-            (UpsertLock, lock_vec, upsert_many_locks),
-            (UpsertUnlock, unlock_vec, upsert_many_unlocks)
+            0 => {
+                UpsertAddress => (address_vec, upsert_many_addresses),
+                UpsertTokenInfo => (token_info_vec, upsert_many_info),
+                UpsertLock => (lock_vec, upsert_many_locks),
+                UpsertUnlock => (unlock_vec, upsert_many_unlocks)
+            },
+            1 => {
+                UpsertXudt => (xudt_vec, upsert_many_xudt),
+                UpsertCluster => (cluster_vec, upsert_many_clusters)
+            },
+            2 => {
+                UpsertSpores => (spores_vec, upsert_many_spores),
+                UpdateXudt => (status_vec, upsert_many_status)
+            },
+            3 => {
+                UpsertActions => (actions_vec, upsert_many_actions)
+            }
         };
 
-        if let Some(pre) = commited.await? {
-            pre.await??;
-        };
-
-        block_height::ActiveModel {
-            id: sea_orm::Set(1),
-            height: sea_orm::Set(height as i64),
-        }
-        .update(&txn)
-        .await?;
-
-        tracing::debug!("commiting {height} ...");
-
-        txn.commit().await?;
-
-        tracing::info!("commited {height}!");
+        tracing::info!("committed {height}!");
 
         Ok(())
     }

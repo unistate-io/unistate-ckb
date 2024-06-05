@@ -42,6 +42,7 @@ impl Default for FeatcherConfig {
 pub(crate) struct UnistateConfigOptional {
     pub(crate) initial_height: u64,
     pub(crate) batch_size: u64,
+    pub(crate) fetch_size: usize,
     pub(crate) interval: f32,
     pub(crate) level: Level,
     pub(crate) network: NetworkType,
@@ -73,6 +74,7 @@ impl Default for UnistateConfigOptional {
         Self {
             initial_height: 1,
             batch_size: 200,
+            fetch_size: 5,
             interval: 5.0,
             level: Level::Info,
             network: NetworkType::Mainnet,
