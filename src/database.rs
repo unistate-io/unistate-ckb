@@ -1,3 +1,4 @@
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use sea_orm::{
     sea_query::OnConflict, ActiveModelTrait, DbConn, DbErr, EntityTrait as _, TransactionTrait,
 };
@@ -28,170 +29,87 @@ pub enum Operations {
 }
 
 macro_rules! define_conflict {
-    ([$($column:expr),*], update => [$($update_columns:expr),*]) => {
-        OnConflict::column([$($column),*])
-        .update_columns([$($update_columns),*])
-        .to_owned()
-    };
-    ($column:expr, update => [$($update_columns:expr),*]) => {
-        OnConflict::column($column)
-        .update_columns([$($update_columns),*])
-        .to_owned()
-    };
-    ([$($column:expr),*]) => {
+    ($($column:expr),* $(=> [$($update_columns:expr),*])?) => {
         OnConflict::columns([$($column),*])
         .do_nothing()
-        .to_owned()
-    };
-    ($column:expr) => {
-        OnConflict::column($column)
-        .do_nothing()
+        $(.update_columns([$($update_columns),*]))?
         .to_owned()
     };
 }
 
 macro_rules! define_upsert_function {
-    // Define function for inserting many records with a conflict update
-    ($fn_name:ident, $entity:ident, $batch_size:expr,[$($column:expr),*], update => [$($update_columns:expr),*]) => {
+    ($fn_name:ident, $entity:ident, $batch_size:expr, $conflict:expr) => {
         async fn $fn_name(
-            mut buffer: Vec<$entity::ActiveModel>,
+            buffer: Vec<$entity::ActiveModel>,
             db: &sea_orm::DatabaseTransaction,
         ) -> Result<(), anyhow::Error> {
-            loop {
-                let len = buffer.len();
-                if len == 0 {
-                    return Ok(());
-                }
-                match $entity::Entity::insert_many(buffer.drain(..len.min($batch_size)))
-                .on_conflict(
-                    define_conflict!([$($column),*],update => [$($update_columns),*])
-                )
-                .exec(db)
-                .await
-                {
-                    Ok(_) | Err(DbErr::RecordNotInserted) => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-    };
-    // Define function for inserting a single record with a conflict update
-    ($fn_name:ident, $entity:ident,$batch_size:expr, $column:expr, update => [$($update_columns:expr),*]) => {
-        async fn $fn_name(
-            mut buffer: Vec<$entity::ActiveModel>,
-            db: &sea_orm::DatabaseTransaction,
-        ) -> Result<(), anyhow::Error> {
-            loop {
-                let len = buffer.len();
-                if len == 0 {
-                    return Ok(());
-                }
-                match $entity::Entity::insert_many(buffer.drain(..len.min($batch_size)))
-                .on_conflict(
-                    define_conflict!($column, update => [$($update_columns),*])
-                )
-                .exec(db)
-                .await
-                {
-                    Ok(_) | Err(DbErr::RecordNotInserted) => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-    };
-    // Define function for inserting many records without update on conflict
-    ($fn_name:ident, $entity:ident, $batch_size:expr,[$($column:expr),*]) => {
-        async fn $fn_name(
-            mut buffer: Vec<$entity::ActiveModel>,
-            db: &sea_orm::DatabaseTransaction,
-        ) -> Result<(), anyhow::Error> {
-            loop {
-                let len = buffer.len();
-                if len == 0 {
-                    return Ok(());
-                }
-                match $entity::Entity::insert_many(buffer.drain(..len.min($batch_size)))
-                .on_conflict(
-                    define_conflict!([$($column),*])
-                )
-                .exec(db)
-                .await
-                {
-                    Ok(_) | Err(DbErr::RecordNotInserted) => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-    };
-    // Define function for inserting a single record without update on conflict
-    ($fn_name:ident, $entity:ident,$batch_size:expr, $column:expr) => {
-        async fn $fn_name(
-            mut buffer: Vec<$entity::ActiveModel>,
-            db: &sea_orm::DatabaseTransaction,
-        ) -> Result<(), anyhow::Error> {
-            loop {
-                let len = buffer.len();
-                if len == 0 {
-                    return Ok(());
-                }
-                match $entity::Entity::insert_many(buffer.drain(..len.min($batch_size)))
-                .on_conflict(
-                    define_conflict!($column)
-                )
-                .exec(db)
-                .await
-                {
-                    Ok(_) | Err(DbErr::RecordNotInserted) => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            }
+            let futs = buffer
+                .into_par_iter()
+                .chunks($batch_size)
+                .map(|batch| async move {
+                    match $entity::Entity::insert_many(batch)
+                        .on_conflict($conflict)
+                        .exec(db)
+                        .await
+                    {
+                        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            futures::future::try_join_all(futs).await?;
+
+            Ok(())
         }
     };
 }
 
-define_upsert_function!(
-    upsert_many_xudt,
-    xudt_cell,
-    1000,
-    [
-        xudt_cell::Column::TransactionHash,
-        xudt_cell::Column::TransactionIndex
-    ]
-);
+macro_rules! define_upsert_functions {
+    ($($fn_name:ident => ($entity:ident, $batch_size:expr, $conflict:expr),)*) => {
+        $(
+            define_upsert_function!($fn_name, $entity, $batch_size, $conflict);
+        )*
+    };
+}
 
-define_upsert_function!(
-    upsert_many_info,
-    token_info,
-    1000,
-    [
-        token_info::Column::TransactionHash,
-        token_info::Column::TransactionIndex
-    ]
-);
-
-define_upsert_function!(
-    upsert_many_status,
-    xudt_status_cell,
-    1000,
-    [
-        xudt_status_cell::Column::TransactionHash,
-        xudt_status_cell::Column::TransactionIndex
-    ]
-);
-
-define_upsert_function!(
-    upsert_many_addresses,
-    addresses,
-    2000,
+define_upsert_functions! {
+    upsert_many_xudt => (
+        xudt_cell,
+        1000,
+        define_conflict!(
+            xudt_cell::Column::TransactionHash,
+            xudt_cell::Column::TransactionIndex
+        )
+    ),
+    upsert_many_info => (
+        token_info,
+        1000,
+        define_conflict!(
+            token_info::Column::TransactionHash,
+            token_info::Column::TransactionIndex
+        )
+    ),
+    upsert_many_status => (
+        xudt_status_cell,
+        1000,
+        define_conflict!(
+            xudt_status_cell::Column::TransactionHash,
+            xudt_status_cell::Column::TransactionIndex
+        )
+    ),
+    upsert_many_addresses => (
+        addresses,
+        2000,
+        define_conflict!(
     addresses::Column::Id
-);
-
-define_upsert_function! {
-    upsert_many_clusters,
-    clusters,
-    1000,
-    clusters::Column::Id,
-    update => [
+        )
+    ),
+    upsert_many_clusters => (
+        clusters,
+        1000,
+        define_conflict!(
+        clusters::Column::Id => [
         clusters::Column::OwnerAddress,
         clusters::Column::ClusterName,
         clusters::Column::ClusterDescription,
@@ -199,14 +117,13 @@ define_upsert_function! {
         clusters::Column::IsBurned,
         clusters::Column::UpdatedAt
     ]
-}
-
-define_upsert_function! {
-    upsert_many_spores,
-    spores,
-    1000,
-    spores::Column::Id,
-    update => [
+        )
+    ),
+    upsert_many_spores => (
+        spores,
+        1000,
+        define_conflict!(
+        spores::Column::Id => [
         spores::Column::OwnerAddress,
         spores::Column::ContentType,
         spores::Column::Content,
@@ -214,28 +131,30 @@ define_upsert_function! {
         spores::Column::IsBurned,
         spores::Column::UpdatedAt
     ]
-}
-
-define_upsert_function!(
-    upsert_many_actions,
-    spore_actions,
-    1000,
+        )
+    ),
+    upsert_many_actions => (
+        spore_actions,
+        1000,
+        define_conflict!(
     spore_actions::Column::Id
-);
-
-define_upsert_function!(
-    upsert_many_locks,
-    rgbpp_locks,
-    1000,
+        )
+    ),
+    upsert_many_locks => (
+        rgbpp_locks,
+        1000,
+        define_conflict!(
     rgbpp_locks::Column::LockId
-);
-
-define_upsert_function!(
-    upsert_many_unlocks,
-    rgbpp_unlocks,
-    1000,
+        )
+    ),
+    upsert_many_unlocks => (
+        rgbpp_unlocks,
+        1000,
+        define_conflict!(
     rgbpp_unlocks::Column::UnlockId
-);
+        )
+    ),
+}
 
 macro_rules! process_operations {
     ($commited:expr, $height:expr, $db:expr, $recv:expr, $( $stage:expr => { $( $variant:ident => ($vec:ident, $upsert_fn:ident) ),* } ),*) => {
