@@ -75,7 +75,7 @@ impl Default for UnistateConfigOptional {
             initial_height: 1,
             batch_size: 200,
             fetch_size: 5,
-            interval: 5.0,
+            interval: 1.0,
             level: Level::Info,
             network: NetworkType::Mainnet,
         }
