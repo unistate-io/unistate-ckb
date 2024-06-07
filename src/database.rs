@@ -38,11 +38,12 @@ macro_rules! define_conflict {
 }
 
 macro_rules! define_upsert_function {
-    ($fn_name:ident, $entity:ident, $batch_size:expr, $conflict:expr) => {
+    ($fn_name:ident, $entity:ident, $batch_size:expr, $conflict:expr $(,$merge:ident)?) => {
         async fn $fn_name(
             buffer: Vec<$entity::ActiveModel>,
             db: &sea_orm::DatabaseTransaction,
         ) -> Result<(), anyhow::Error> {
+            $(let buffer = $merge(buffer);)?
             let futs = buffer
                 .into_par_iter()
                 .chunks($batch_size)
@@ -66,9 +67,9 @@ macro_rules! define_upsert_function {
 }
 
 macro_rules! define_upsert_functions {
-    ($($fn_name:ident => ($entity:ident, $batch_size:expr, $conflict:expr),)*) => {
+    ($($fn_name:ident => ($entity:ident, $batch_size:expr, $conflict:expr $(,$merge:ident)?),)*) => {
         $(
-            define_upsert_function!($fn_name, $entity, $batch_size, $conflict);
+            define_upsert_function!($fn_name, $entity, $batch_size, $conflict $(,$merge)?);
         )*
     };
 }
@@ -82,6 +83,7 @@ define_upsert_functions! {
             xudt_cell::Column::TransactionIndex
         )
     ),
+
     upsert_many_info => (
         token_info,
         1000,
@@ -90,6 +92,7 @@ define_upsert_functions! {
             token_info::Column::TransactionIndex
         )
     ),
+
     upsert_many_status => (
         xudt_status_cell,
         1000,
@@ -98,60 +101,68 @@ define_upsert_functions! {
             xudt_status_cell::Column::TransactionIndex
         )
     ),
+
     upsert_many_addresses => (
         addresses,
         2000,
         define_conflict!(
-    addresses::Column::Id
+            addresses::Column::Id
         )
     ),
+
     upsert_many_clusters => (
         clusters,
         1000,
         define_conflict!(
-        clusters::Column::Id => [
-        clusters::Column::OwnerAddress,
-        clusters::Column::ClusterName,
-        clusters::Column::ClusterDescription,
-        clusters::Column::MutantId,
-        clusters::Column::IsBurned,
-        clusters::Column::UpdatedAt
-    ]
-        )
+            clusters::Column::Id => [
+                clusters::Column::OwnerAddress,
+                clusters::Column::ClusterName,
+                clusters::Column::ClusterDescription,
+                clusters::Column::MutantId,
+                clusters::Column::IsBurned,
+                clusters::Column::UpdatedAt
+            ]
+        ),
+        merge_clusters
     ),
+
     upsert_many_spores => (
         spores,
         1000,
         define_conflict!(
-        spores::Column::Id => [
-        spores::Column::OwnerAddress,
-        spores::Column::ContentType,
-        spores::Column::Content,
-        spores::Column::ClusterId,
-        spores::Column::IsBurned,
-        spores::Column::UpdatedAt
-    ]
-        )
+            spores::Column::Id => [
+                spores::Column::OwnerAddress,
+                spores::Column::ContentType,
+                spores::Column::Content,
+                spores::Column::ClusterId,
+                spores::Column::IsBurned,
+                spores::Column::UpdatedAt
+            ]
+        ),
+        merge_spores
     ),
+
     upsert_many_actions => (
         spore_actions,
         1000,
         define_conflict!(
-    spore_actions::Column::Id
+            spore_actions::Column::Id
         )
     ),
+
     upsert_many_locks => (
         rgbpp_locks,
         1000,
         define_conflict!(
-    rgbpp_locks::Column::LockId
+            rgbpp_locks::Column::LockId
         )
     ),
+
     upsert_many_unlocks => (
         rgbpp_unlocks,
         1000,
         define_conflict!(
-    rgbpp_unlocks::Column::UnlockId
+            rgbpp_unlocks::Column::UnlockId
         )
     ),
 }
@@ -292,3 +303,35 @@ impl DatabaseProcessor {
         Ok(())
     }
 }
+
+macro_rules! merge_models {
+    ($fn_name:ident, $model:ident) => {
+        fn $fn_name(items: Vec<$model::ActiveModel>) -> Vec<$model::ActiveModel> {
+            use sea_orm::ActiveValue::Set;
+
+            let unique_items = dashmap::DashMap::<Vec<u8>, $model::ActiveModel>::new();
+
+            items.into_par_iter().for_each(|item| {
+                if let Set(ref id) = item.id {
+                    if !unique_items.contains_key(id)
+                        || unique_items
+                            .get(id)
+                            .unwrap()
+                            .updated_at
+                            .try_as_ref()
+                            .unwrap()
+                            < item.updated_at.try_as_ref().unwrap()
+                    {
+                        unique_items.insert(id.clone(), item);
+                    }
+                }
+            });
+
+            let (_, results) = unique_items.into_par_iter().unzip::<_, _, Vec<_>, Vec<_>>();
+            results
+        }
+    };
+}
+
+merge_models!(merge_clusters, clusters);
+merge_models!(merge_spores, spores);

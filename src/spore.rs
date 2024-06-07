@@ -408,7 +408,6 @@ fn upsert_spores(
             is_burned: Set(is_burned),
             created_at: Set(now),
             updated_at: Set(now),
-            ..Default::default()
         };
 
         op_sender.send(Operations::UpsertCluster(model))?;
@@ -424,7 +423,6 @@ fn upsert_spores(
             is_burned: Set(is_burned),
             created_at: Set(now),
             updated_at: Set(now),
-            ..Default::default()
         };
         op_sender.send(Operations::UpsertSpores(model))?;
     }
