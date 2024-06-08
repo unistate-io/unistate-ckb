@@ -104,8 +104,7 @@ define_upsert_functions! {
         token_info,
         6,
         define_conflict!(
-            token_info::Column::TransactionHash,
-            token_info::Column::TransactionIndex
+            token_info::Column::TypeId
         )
     ),
 
