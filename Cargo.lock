@@ -1006,6 +1006,7 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
+ "rayon",
 ]
 
 [[package]]
@@ -4178,6 +4179,7 @@ dependencies = [
  "ckb-sdk",
  "ckb-types",
  "criterion",
+ "dashmap",
  "dotenvy",
  "figment",
  "futures",
