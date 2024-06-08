@@ -71,9 +71,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config_level: tracing::Level = config.unistate.optional_config.level.into();
 
-    let filter = FilterFn::new(move |metadata| {
-        metadata.level() <= &config_level && metadata.module_path().is_some()
-    });
+    let filter = FilterFn::new(move |metadata| metadata.level() <= &config_level);
 
     let layer = tracing_subscriber::fmt::layer()
         .without_time()
