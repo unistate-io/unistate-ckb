@@ -37,8 +37,11 @@ macro_rules! define_conflict {
     };
 }
 
+const MAX_RETRIES: u32 = 5;
+const RETRY_DELAY_MS: u64 = 500;
+
 macro_rules! define_upsert_function {
-    ($fn_name:ident, $entity:ident, $batch_size:expr, $conflict:expr $(,$merge:ident)?) => {
+    ($fn_name:ident, $entity:ident, $filed_count:expr, $conflict:expr $(,$merge:ident)?) => {
         async fn $fn_name(
             buffer: Vec<$entity::ActiveModel>,
             db: &sea_orm::DatabaseTransaction,
@@ -46,20 +49,33 @@ macro_rules! define_upsert_function {
             $(let buffer = $merge(buffer);)?
             let futs = buffer
                 .into_par_iter()
-                .chunks($batch_size)
+                .chunks((u16::MAX / $filed_count) as usize)
                 .map(|batch| async move {
-                    match $entity::Entity::insert_many(batch)
-                        .on_conflict($conflict)
-                        .exec(db)
-                        .await
-                    {
-                        Ok(_) | Err(DbErr::RecordNotInserted) => Ok(()),
-                        Err(e) => Err(e),
+                    let mut retry_count = 0;
+                    loop {
+                        match $entity::Entity::insert_many(batch.clone())
+                            .on_conflict($conflict)
+                            .exec_without_returning(db)
+                            .await
+                        {
+                            Ok(val) => break Ok(val),
+                            Err(DbErr::RecordNotInserted) if retry_count < MAX_RETRIES => {
+                                // If the insertion fails due to a database connection issue,
+                                // we retry the operation up to a maximum number of retries.
+                                retry_count += 1;
+                                tracing::warn!("Insertion failed, attempting retry {}/{}", retry_count, MAX_RETRIES);
+                                tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await; // Sleep for a short duration before retrying.
+                            }
+                            Err(e) => break Err(e),
+                        }
                     }
                 })
                 .collect::<Vec<_>>();
 
-            futures::future::try_join_all(futs).await?;
+            let counters = futures::future::try_join_all(futs).await?;
+            let counter = counters.into_par_iter().sum::<u64>();
+
+            tracing::info!("upserted {} {}", counter, stringify!($entity));
 
             Ok(())
         }
@@ -77,7 +93,7 @@ macro_rules! define_upsert_functions {
 define_upsert_functions! {
     upsert_many_xudt => (
         xudt_cell,
-        1000,
+        10,
         define_conflict!(
             xudt_cell::Column::TransactionHash,
             xudt_cell::Column::TransactionIndex
@@ -86,7 +102,7 @@ define_upsert_functions! {
 
     upsert_many_info => (
         token_info,
-        1000,
+        6,
         define_conflict!(
             token_info::Column::TransactionHash,
             token_info::Column::TransactionIndex
@@ -95,7 +111,7 @@ define_upsert_functions! {
 
     upsert_many_status => (
         xudt_status_cell,
-        1000,
+        4,
         define_conflict!(
             xudt_status_cell::Column::TransactionHash,
             xudt_status_cell::Column::TransactionIndex
@@ -104,7 +120,7 @@ define_upsert_functions! {
 
     upsert_many_addresses => (
         addresses,
-        2000,
+        4,
         define_conflict!(
             addresses::Column::Id
         )
@@ -112,7 +128,7 @@ define_upsert_functions! {
 
     upsert_many_clusters => (
         clusters,
-        1000,
+        8,
         define_conflict!(
             clusters::Column::Id => [
                 clusters::Column::OwnerAddress,
@@ -128,7 +144,7 @@ define_upsert_functions! {
 
     upsert_many_spores => (
         spores,
-        1000,
+        8,
         define_conflict!(
             spores::Column::Id => [
                 spores::Column::OwnerAddress,
@@ -144,7 +160,7 @@ define_upsert_functions! {
 
     upsert_many_actions => (
         spore_actions,
-        1000,
+        15,
         define_conflict!(
             spore_actions::Column::Id
         )
@@ -152,7 +168,7 @@ define_upsert_functions! {
 
     upsert_many_locks => (
         rgbpp_locks,
-        1000,
+        4,
         define_conflict!(
             rgbpp_locks::Column::LockId
         )
@@ -160,7 +176,7 @@ define_upsert_functions! {
 
     upsert_many_unlocks => (
         rgbpp_unlocks,
-        1000,
+        7,
         define_conflict!(
             rgbpp_unlocks::Column::UnlockId
         )
