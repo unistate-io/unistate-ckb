@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Error};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TokenInfo {
     pub decimal: u8,
     pub name: String,
