@@ -198,6 +198,8 @@ fn upsert_token_info(
         symbol: Set(symbol),
     };
 
+    debug!("token info: {token_info:?}");
+
     op_sender.send(Operations::UpsertTokenInfo(token_info))?;
 
     Ok(())
@@ -331,6 +333,30 @@ enum XudtParseResult {
     Xudt(Xudt),
 }
 
+#[derive(Debug, Clone)]
+struct TokenData {
+    info: Option<(TokenInfo, usize)>,
+    token_id: Option<String>,
+}
+
+impl TokenData {
+    fn new() -> Self {
+        Self {
+            info: None,
+            token_id: None,
+        }
+    }
+    fn merge(self, other: Self) -> Self {
+        Self {
+            info: self.info.or(other.info),
+            token_id: self.token_id.or(other.token_id),
+        }
+    }
+    fn zip(self) -> Option<((TokenInfo, usize), String)> {
+        self.info.zip(self.token_id)
+    }
+}
+
 fn index_xudt(
     tx: TransactionView,
     network: NetworkType,
@@ -345,7 +371,8 @@ fn index_xudt(
     let xudt_witness_output = process_witnesses::<false>(&tx);
     debug!("XudtWitnessOutput: {:?}", xudt_witness_output);
 
-    tx.inner
+    let token_data = tx
+        .inner
         .outputs
         .into_par_iter()
         .zip(tx.inner.outputs_data.into_par_iter())
@@ -383,27 +410,29 @@ fn index_xudt(
                 None
             }
         })
-        .try_for_each_init(
-            || (None, None),
-            |(info_op, type_id_op), (xudt, index)| -> anyhow::Result<()> {
+        .try_fold_with(
+            TokenData::new(),
+            |mut token_data, (xudt, index)| -> anyhow::Result<TokenData> {
                 match xudt {
                     XudtParseResult::XudtInfo(info) => {
-                        *info_op = Some(info);
+                        token_data.info = Some((info, index));
                     }
                     XudtParseResult::Xudt(xudt) => {
                         let xudt_type_id =
                             upsert_xudt(xudt, network, tx.hash.clone(), index, op_sender.clone())?;
-                        *type_id_op = Some(xudt_type_id);
+                        token_data.token_id = Some(xudt_type_id);
                     }
                 }
-                if info_op.is_some() && type_id_op.is_some() {
-                    let info = info_op.take().unwrap();
-                    let type_id = type_id_op.take().unwrap();
-                    upsert_token_info(info, tx.hash.clone(), index, type_id, op_sender.clone())?;
-                }
-                Ok(())
+                debug!("token data: {token_data:?}");
+
+                Ok(token_data)
             },
-        )?;
+        )
+        .try_reduce(TokenData::new, |pre, new| Ok(pre.merge(new)))?;
+
+    if let Some(((info, index), token_id)) = token_data.zip() {
+        upsert_token_info(info, tx.hash.clone(), index, token_id, op_sender.clone())?;
+    }
 
     tx.inner.inputs.into_par_iter().enumerate().try_for_each(
         |(input_index, input)| -> anyhow::Result<()> {
