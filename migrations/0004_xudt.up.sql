@@ -42,15 +42,16 @@ EXECUTE FUNCTION update_is_consumed();
 
 -- Create token_info table
 CREATE TABLE token_info (
+  type_id VARCHAR NOT NULL PRIMARY KEY REFERENCES addresses(id),
   transaction_hash BYTEA NOT NULL,
   transaction_index INTEGER NOT NULL,
-  type_id VARCHAR NOT NULL,
   decimal SMALLINT NOT NULL,
   name VARCHAR(255) NOT NULL,
   symbol VARCHAR(255) NOT NULL,
-  PRIMARY KEY (type_id)
 );
 
 -- Add indexes to xudt_cell fields
 CREATE INDEX idx_xudt_cell_lock_id ON xudt_cell (lock_id);
 CREATE INDEX idx_xudt_cell_type_id ON xudt_cell (type_id);
+-- Add indexes to token_info fields
+CREATE INDEX idx_token_info_type_id ON token_info (type_id);
