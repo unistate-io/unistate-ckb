@@ -47,7 +47,7 @@ CREATE TABLE token_info (
   transaction_index INTEGER NOT NULL,
   decimal SMALLINT NOT NULL,
   name VARCHAR(255) NOT NULL,
-  symbol VARCHAR(255) NOT NULL,
+  symbol VARCHAR(255) NOT NULL
 );
 
 -- Add indexes to xudt_cell fields

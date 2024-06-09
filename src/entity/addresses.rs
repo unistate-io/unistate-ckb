@@ -20,6 +20,8 @@ pub enum Relation {
     Clusters,
     #[sea_orm(has_many = "super::spores::Entity")]
     Spores,
+    #[sea_orm(has_many = "super::token_info::Entity")]
+    TokenInfo,
 }
 
 impl Related<super::clusters::Entity> for Entity {
@@ -31,6 +33,12 @@ impl Related<super::clusters::Entity> for Entity {
 impl Related<super::spores::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Spores.def()
+    }
+}
+
+impl Related<super::token_info::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TokenInfo.def()
     }
 }
 
