@@ -190,12 +190,12 @@ fn upsert_token_info(
     } = token_info;
 
     let token_info = token_info::ActiveModel {
+        type_id: Set(type_id),
         transaction_hash: Set(tx_hash.0.to_vec()),
         transaction_index: Set(index as i32),
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
-        type_id: Set(type_id),
     };
 
     op_sender.send(Operations::UpsertTokenInfo(token_info))?;
