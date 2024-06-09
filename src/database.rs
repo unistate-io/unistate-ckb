@@ -296,11 +296,11 @@ impl DatabaseProcessor {
             recv,
             0 => {
                 UpsertAddress => (address_vec, upsert_many_addresses),
-                UpsertTokenInfo => (token_info_vec, upsert_many_info),
                 UpsertLock => (lock_vec, upsert_many_locks),
                 UpsertUnlock => (unlock_vec, upsert_many_unlocks)
             },
             1 => {
+                UpsertTokenInfo => (token_info_vec, upsert_many_info),
                 UpsertXudt => (xudt_vec, upsert_many_xudt),
                 UpsertCluster => (cluster_vec, upsert_many_clusters)
             },
