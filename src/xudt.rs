@@ -19,7 +19,7 @@ use tracing::debug;
 use crate::{
     constants::Constants,
     database::Operations,
-    entity::{token_info, xudt_cell, xudt_status_cell},
+    entity::{token_info, transaction_outputs_status, xudt_cell},
     schemas::{
         action, blockchain,
         xudt_rce::{self, ScriptVec, XudtData},
@@ -72,11 +72,6 @@ struct Xudt {
     owner_lock_script_hash: Option<[u8; 32]>,
     type_script: ckb_jsonrpc_types::Script,
     lock_script: ckb_jsonrpc_types::Script,
-}
-
-struct InputOutPoint {
-    hash: H256,
-    index: usize,
 }
 
 fn upsert_xudt(
@@ -158,20 +153,34 @@ fn upsert_xudt(
     Ok(type_id)
 }
 
-fn update_xudt(
-    tx_hash: H256,
-    index: usize,
-    out_point: InputOutPoint,
+struct InputOutPoint {
+    input_transaction_hash: H256,
+    input_transaction_index: usize,
+}
+
+impl InputOutPoint {
+    fn new(current_tx_hash: H256, current_tx_index: usize) -> Self {
+        Self {
+            input_transaction_hash: current_tx_hash,
+            input_transaction_index: current_tx_index,
+        }
+    }
+}
+
+fn update_xudt_cell(
+    output_tx_hash: H256,
+    output_index: usize,
+    input_outpoint: InputOutPoint,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    let xudt_cell = xudt_status_cell::ActiveModel {
-        transaction_hash: Set(tx_hash.0.to_vec()),
-        transaction_index: Set(index as i32),
-        input_transaction_index: Set(Some(out_point.index as i32)),
-        input_transaction_hash: Set(Some(out_point.hash.0.to_vec())),
+    let xudt_cell = transaction_outputs_status::ActiveModel {
+        output_transaction_hash: Set(output_tx_hash.0.to_vec()),
+        output_transaction_index: Set(output_index as i32),
+        consumed_input_transaction_hash: Set(Some(input_outpoint.input_transaction_hash.0.to_vec())),
+        consumed_input_transaction_index: Set(Some(input_outpoint.input_transaction_index as i32)),
     };
 
-    op_sender.send(Operations::UpdateXudt(xudt_cell))?;
+    op_sender.send(Operations::UpdateXudtCell(xudt_cell))?;
 
     Ok(())
 }
@@ -436,16 +445,13 @@ fn index_xudt(
 
     tx.inner.inputs.into_par_iter().enumerate().try_for_each(
         |(input_index, input)| -> anyhow::Result<()> {
-            let tx_hash = input.previous_output.tx_hash.clone();
-            let index = input.previous_output.index.value() as usize;
+            let previous_tx_hash = input.previous_output.tx_hash.clone();
+            let previous_tx_index = input.previous_output.index.value() as usize;
 
-            update_xudt(
-                tx_hash,
-                index,
-                InputOutPoint {
-                    hash: tx.hash.clone(),
-                    index: input_index,
-                },
+            update_xudt_cell(
+                previous_tx_hash,
+                previous_tx_index,
+                InputOutPoint::new(tx.hash.clone(), input_index),
                 op_sender.clone(),
             )?;
             Ok(())

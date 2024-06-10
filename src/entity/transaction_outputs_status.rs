@@ -3,19 +3,19 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "xudt_status_cell")]
+#[sea_orm(table_name = "transaction_outputs_status")]
 pub struct Model {
     #[sea_orm(
         primary_key,
         auto_increment = false,
         column_type = "VarBinary(StringLen::None)"
     )]
-    pub transaction_hash: Vec<u8>,
+    pub output_transaction_hash: Vec<u8>,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub transaction_index: i32,
+    pub output_transaction_index: i32,
     #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
-    pub input_transaction_hash: Option<Vec<u8>>,
-    pub input_transaction_index: Option<i32>,
+    pub consumed_input_transaction_hash: Option<Vec<u8>>,
+    pub consumed_input_transaction_index: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

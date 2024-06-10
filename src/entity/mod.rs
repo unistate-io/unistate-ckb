@@ -11,5 +11,5 @@ pub mod sea_orm_active_enums;
 pub mod spore_actions;
 pub mod spores;
 pub mod token_info;
+pub mod transaction_outputs_status;
 pub mod xudt_cell;
-pub mod xudt_status_cell;
