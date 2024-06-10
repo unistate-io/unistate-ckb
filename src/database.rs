@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::entity::{
     addresses, block_height, clusters, rgbpp_locks, rgbpp_unlocks, spore_actions, spores,
-    token_info, xudt_cell, xudt_status_cell,
+    token_info, transaction_outputs_status, xudt_cell,
 };
 
 pub struct DatabaseProcessor {
@@ -17,7 +17,7 @@ pub struct DatabaseProcessor {
 }
 
 pub enum Operations {
-    UpdateXudt(xudt_status_cell::ActiveModel),
+    UpdateXudtCell(transaction_outputs_status::ActiveModel),
     UpsertTokenInfo(token_info::ActiveModel),
     UpsertXudt(xudt_cell::ActiveModel),
     UpsertAddress(addresses::ActiveModel),
@@ -109,11 +109,11 @@ define_upsert_functions! {
     ),
 
     upsert_many_status => (
-        xudt_status_cell,
+        transaction_outputs_status,
         4,
         define_conflict!(
-            xudt_status_cell::Column::TransactionHash,
-            xudt_status_cell::Column::TransactionIndex
+            transaction_outputs_status::Column::OutputTransactionHash,
+            transaction_outputs_status::Column::OutputTransactionIndex
         )
     ),
 
@@ -306,7 +306,7 @@ impl DatabaseProcessor {
             },
             2 => {
                 UpsertSpores => (spores_vec, upsert_many_spores),
-                UpdateXudt => (status_vec, upsert_many_status)
+                UpdateXudtCell => (status_vec, upsert_many_status)
             },
             3 => {
                 UpsertActions => (actions_vec, upsert_many_actions)
