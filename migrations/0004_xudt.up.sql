@@ -15,28 +15,27 @@ CREATE TABLE xudt_cell (
 );
 
 -- Create xudt_status_cell table
-CREATE TABLE xudt_status_cell (
-  transaction_hash BYTEA NOT NULL,
-  transaction_index INTEGER NOT NULL,
-  input_transaction_hash BYTEA,
-  input_transaction_index INTEGER,
-  PRIMARY KEY (transaction_hash, transaction_index)
+CREATE TABLE transaction_outputs_status (
+  output_transaction_hash BYTEA NOT NULL,
+  output_transaction_index INTEGER NOT NULL,
+  consumed_input_transaction_hash BYTEA,
+  consumed_input_transaction_index INTEGER,
+  PRIMARY KEY (output_transaction_hash, output_transaction_index)
 );
-
--- Add a trigger to update is_consumed field in xudt_cell when a record is inserted into xudt_status_cell
+-- Add a trigger to update is_consumed field in xudt_cell when a record is inserted into transaction_outputs_status
 CREATE OR REPLACE FUNCTION update_is_consumed()
 RETURNS TRIGGER AS $$
 BEGIN
   UPDATE xudt_cell
   SET is_consumed = TRUE
-  WHERE transaction_hash = NEW.input_transaction_hash
-    AND transaction_index = NEW.input_transaction_index;
+  WHERE transaction_hash = NEW.output_transaction_hash
+    AND transaction_index = NEW.output_transaction_index;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_update_is_consumed
-AFTER INSERT ON xudt_status_cell
+AFTER INSERT ON transaction_outputs_status
 FOR EACH ROW
 EXECUTE FUNCTION update_is_consumed();
 
