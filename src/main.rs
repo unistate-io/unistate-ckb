@@ -225,6 +225,8 @@ async fn main() -> anyhow::Result<()> {
             if new_target != target_height {
                 target_height = new_target;
                 batch_size = (target_height - height).min(max_batch_size);
+            } else {
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
 
