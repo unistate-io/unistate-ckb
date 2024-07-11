@@ -74,41 +74,31 @@ fn index_inscription_info(
         .into_par_iter()
         .zip(tx.inner.outputs_data.into_par_iter())
         .enumerate()
-        .filter_map(|(idx, (output, data))| {
-            output
-                .type_
-                .filter(|tp| {
-                    let inscription_info = constants.inscription_info_type_script();
-                    tp.code_hash.eq(&inscription_info.code_hash)
-                        && tp.hash_type.eq(&inscription_info.hash_type)
-                })
-                .map(|tp| {
-                    deserialize_inscription_info(data.as_bytes()).map(
-                        |info| -> anyhow::Result<()> {
-                            let type_id = upsert_address(
-                                &action::AddressUnion::Script(action::Script::new_unchecked(
-                                    packed::Script::from(tp).as_bytes(),
-                                )),
-                                network,
-                                op_sender.clone(),
-                            )?;
-
-                            upsert_inscription_info(
-                                info,
-                                tx.hash.clone(),
-                                idx,
-                                type_id,
-                                op_sender.clone(),
-                            )?;
-
-                            Ok(())
-                        },
-                    )??;
-
-                    Ok(())
-                })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .try_for_each(|(idx, (output, data))| -> anyhow::Result<()> {
+            if let Some(tp) = output.type_ {
+                let inscription_info = constants.inscription_info_type_script();
+                if tp.code_hash.eq(&inscription_info.code_hash)
+                    && tp.hash_type.eq(&inscription_info.hash_type)
+                {
+                    let info = deserialize_inscription_info(data.as_bytes())?;
+                    let type_id = upsert_address(
+                        &action::AddressUnion::Script(action::Script::new_unchecked(
+                            packed::Script::from(tp).as_bytes(),
+                        )),
+                        network,
+                        op_sender.clone(),
+                    )?;
+                    upsert_inscription_info(
+                        info,
+                        tx.hash.clone(),
+                        idx,
+                        type_id,
+                        op_sender.clone(),
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
 
     Ok(())
 }
