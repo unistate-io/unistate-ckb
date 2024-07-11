@@ -16,14 +16,14 @@ ckb-hash = "0.116.1"
 hex = "0.4.3"
 hex-literal = "0.4.1"
 molecule = "0.8.0"
-sea-orm = { version = "1.0.0-rc.5", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-bigdecimal"], default-features = false }
-bigdecimal = "0.3"                                                                                                                                               # 为了 sea-orm 兼容性
+sea-orm = { version = "1.0.0-rc.7", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-bigdecimal"], default-features = false }
+bigdecimal = "0.3"# 为了 sea-orm 兼容性
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4.38", features = ["serde"] }
 sha3 = "0.10.8"
 rayon = "1"
 tracing = "0.1.40"
-jsonrpsee = { version = "0.22", features = ["client", "macros"] }
+jsonrpsee = { version = "0.24", features = ["client", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
@@ -32,7 +32,7 @@ dotenvy = "0.15"
 figment = { version = "0.10", features = ["env", "test", "toml"] }
 async-scoped = { version = "0.9.0", features = ["use-tokio"] }
 futures = "0.3"
-dashmap = { version = "5.5.3", features = ["rayon"] }
+dashmap = { version = "6.0", features = ["rayon"] }
 
 [dev-dependencies]
 criterion = "0.5.1"

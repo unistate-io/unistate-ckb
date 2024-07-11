@@ -29,6 +29,7 @@ mod database;
 mod entity;
 mod error;
 mod fetcher;
+mod inscription;
 mod rgbpp;
 mod schemas;
 mod spore;
@@ -41,6 +42,7 @@ struct CategorizedTxs {
     spore_txs: Vec<SporeTx>,
     xudt_txs: Vec<XudtTx>,
     rgbpp_txs: Vec<TransactionView>,
+    inscription_txs: Vec<TransactionView>,
 }
 
 impl CategorizedTxs {
@@ -49,6 +51,7 @@ impl CategorizedTxs {
             spore_txs: Vec::new(),
             xudt_txs: Vec::new(),
             rgbpp_txs: Vec::new(),
+            inscription_txs: Vec::new(),
         }
     }
 
@@ -56,6 +59,8 @@ impl CategorizedTxs {
         self.rgbpp_txs.par_extend(other.rgbpp_txs.into_par_iter());
         self.spore_txs.par_extend(other.spore_txs.into_par_iter());
         self.xudt_txs.par_extend(other.xudt_txs.into_par_iter());
+        self.inscription_txs
+            .par_extend(other.inscription_txs.into_par_iter());
         self
     }
 }
@@ -139,15 +144,19 @@ async fn main() -> anyhow::Result<()> {
                                     constants.rgbpp_lock_dep().out_point.eq(&cd.out_point)
                                 });
 
-                                let spore = tx.inner.cell_deps.par_iter().any(|cd| {
-                                    constants.spore_type_dep().out_point.eq(&cd.out_point)
-                                        || constants.cluster_type_dep().out_point.eq(&cd.out_point)
+                                let spore = tx
+                                    .inner
+                                    .cell_deps
+                                    .par_iter()
+                                    .any(|cd| constants.is_spore(cd));
+
+                                let xudt = tx.inner.cell_deps.par_iter().any(|cd| {
+                                    constants.xudt_type_dep().out_point.eq(&cd.out_point)
                                 });
 
-                                let xudt =
-                                    tx.inner.cell_deps.par_iter().any(|cd| {
-                                        constants.xudttype_dep().out_point.eq(&cd.out_point)
-                                    });
+                                let inscription = tx.inner.cell_deps.par_iter().any(|cd| {
+                                    constants.inscription_info_dep().out_point.eq(&cd.out_point)
+                                });
 
                                 if spore {
                                     categorized.spore_txs.push(SporeTx {
@@ -161,7 +170,11 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 if rgbpp {
-                                    categorized.rgbpp_txs.push(tx);
+                                    categorized.rgbpp_txs.push(tx.clone());
+                                }
+
+                                if inscription {
+                                    categorized.inscription_txs.push(tx);
                                 }
 
                                 categorized
@@ -175,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
                 spore_txs,
                 xudt_txs,
                 rgbpp_txs,
+                inscription_txs,
             } = categorized_txs;
 
             let spore_idxer = spore::SporeIndexer::new(spore_txs, network, op_sender.clone());
@@ -189,11 +203,16 @@ async fn main() -> anyhow::Result<()> {
 
             tracing::debug!("drop xudt idxer");
 
-            let rgbpp_idxer = rgbpp::RgbppIndexer::new(rgbpp_txs, fetcher, op_sender);
+            let rgbpp_idxer = rgbpp::RgbppIndexer::new(rgbpp_txs, fetcher, op_sender.clone());
 
             rgbpp_idxer.index().await?;
 
             tracing::debug!("drop rgbpp idxer");
+
+            let inscription_idxer =
+                inscription::InscriptionInfoIndexer::new(inscription_txs, network, op_sender);
+
+            inscription_idxer.index()?;
 
             if let Some(pre) = pre_handle_take {
                 pre.await??;
