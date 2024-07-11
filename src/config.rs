@@ -100,6 +100,7 @@ mod tests {
                     [unistate]
                     initial_height = 1000
                     url = "testurl"
+                    network = "Testnet"
                     # auth = { user = "user", password = "password" } 
                     featcher.max_retries = 3
                 "#,
@@ -117,6 +118,7 @@ mod tests {
                         url: "testurl".into(),
                         optional_config: UnistateConfigOptional {
                             initial_height: 1000,
+                            network: NetworkType::Testnet,
                             ..Default::default()
                         },
                         featcher: FeatcherConfig {

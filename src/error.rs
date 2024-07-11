@@ -9,7 +9,9 @@ pub enum Error {
     SerdeJsonError(#[from] serde_json::Error),
     #[error("Failed to fetch the transaction. Error Code: {code}, Message: '{message}'")]
     FailedFetch { code: i32, message: String },
-    #[error("The data received in a batched JSON-RPC response is not valid hexadecimal. Details: {0}")]
+    #[error(
+        "The data received in a batched JSON-RPC response is not valid hexadecimal. Details: {0}"
+    )]
     FromHexError(#[from] hex::FromHexError),
     #[error("An I/O error occurred. Details: {0}")]
     IoError(#[from] std::io::Error),
@@ -17,4 +19,6 @@ pub enum Error {
     PreviousOutputNotFound { tx_hash: H256, index: u32 },
     #[error("The data for the previous output of the transaction '{tx_hash:?}' at index {index} could not be found. Please verify your inputs.")]
     PreviousOutputDataNotFound { tx_hash: H256, index: u32 },
+    #[error("An error occurred related to inscriptions: {0}")]
+    InscriptionError(#[from] crate::inscription::InscriptionError),
 }

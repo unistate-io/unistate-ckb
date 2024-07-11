@@ -176,7 +176,9 @@ fn update_xudt_cell(
     let xudt_cell = transaction_outputs_status::ActiveModel {
         output_transaction_hash: Set(output_tx_hash.0.to_vec()),
         output_transaction_index: Set(output_index as i32),
-        consumed_input_transaction_hash: Set(Some(input_outpoint.input_transaction_hash.0.to_vec())),
+        consumed_input_transaction_hash: Set(Some(
+            input_outpoint.input_transaction_hash.0.to_vec(),
+        )),
         consumed_input_transaction_index: Set(Some(input_outpoint.input_transaction_index as i32)),
     };
 
@@ -205,6 +207,7 @@ fn upsert_token_info(
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
+        ..Default::default()
     };
 
     debug!("token info: {token_info:?}");
@@ -392,7 +395,7 @@ fn index_xudt(
             if p.0
                 .type_
                 .as_ref()
-                .map(|t| constants.xudttype_script().code_hash.eq(&t.code_hash))
+                .map(|t| constants.xudt_type_script().code_hash.eq(&t.code_hash))
                 .unwrap_or(false)
             {
                 debug!("Output is XUDT type");
