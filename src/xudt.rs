@@ -207,7 +207,10 @@ fn upsert_token_info(
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
-        ..Default::default()
+        udt_hash: Set(None),
+        expected_supply: Set(None),
+        mint_limit: Set(None),
+        mint_status: Set(None),
     };
 
     debug!("token info: {token_info:?}");
