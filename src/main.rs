@@ -23,15 +23,19 @@ use xudt::XudtTx;
 
 use entity::block_height;
 
+#[allow(clippy::all)]
+#[allow(unused_imports)]
+mod entity;
+#[allow(clippy::all)]
+mod schemas;
+
 mod config;
 mod constants;
 mod database;
-mod entity;
 mod error;
 mod fetcher;
 mod inscription;
 mod rgbpp;
-mod schemas;
 mod spore;
 mod unique;
 mod xudt;
