@@ -5,6 +5,7 @@ use ckb_jsonrpc_types::{CellDep, DepType, JsonBytes, OutPoint, Script, ScriptHas
 use ckb_sdk::NetworkType;
 use ckb_types::bytes::Bytes;
 use hex_literal::hex;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 // 常量
 pub const CKB_UNIT: u64 = 100000000;
@@ -154,7 +155,7 @@ impl Constants {
 
     pub fn is_spore(self, cd: &CellDep) -> bool {
         self.spore_deps()
-            .into_iter()
+            .into_par_iter()
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
     }
