@@ -302,19 +302,15 @@ fn parse_xudt(
     Some(xudt)
 }
 
-pub struct XudtTx {
-    pub tx: TransactionView,
-}
-
 pub struct XudtIndexer {
-    txs: Vec<XudtTx>,
+    txs: Vec<TransactionView>,
     network: NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
 }
 
 impl XudtIndexer {
     pub fn new(
-        txs: Vec<XudtTx>,
+        txs: Vec<TransactionView>,
         network: NetworkType,
         op_sender: mpsc::UnboundedSender<Operations>,
     ) -> Self {
@@ -334,7 +330,7 @@ impl XudtIndexer {
         let constants = Constants::from_config(network);
 
         txs.into_par_iter()
-            .try_for_each(|tx| index_xudt(tx.tx, network, constants, op_sender.clone()))?;
+            .try_for_each(|tx| index_xudt(tx, network, constants, op_sender.clone()))?;
 
         Ok(())
     }
