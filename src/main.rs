@@ -1,26 +1,35 @@
 use core::time::Duration;
 
-use ckb_jsonrpc_types::{BlockNumber, TransactionView};
+use ckb_jsonrpc_types::{BlockNumber, Status, TransactionView};
 
+use ckb_sdk::{rpc::ResponseFormatGetter, NetworkType};
+use ckb_types::H256;
 use config::Config;
-use database::DatabaseProcessor;
+use dashmap::DashMap;
+use database::{DatabaseProcessor, Operations};
 use figment::{
     providers::{Format as _, Toml},
     Figment,
 };
+use futures::Future;
+use jsonrpsee::http_client::HttpClient;
 use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, ParallelExtend, ParallelIterator,
 };
-use sea_orm::{ConnectOptions, Database, EntityTrait};
+use sea_orm::{ConnectOptions, Database, DbConn, EntityTrait};
 
+use smallvec::SmallVec;
 use spore::SporeTx;
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::{self, JoinHandle, JoinSet},
+};
 use tracing::info;
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
 };
-use xudt::XudtTx;
 
+use anyhow::Result;
 use entity::block_height;
 
 #[allow(clippy::all)]
@@ -44,7 +53,7 @@ const MB: u32 = 1048576;
 
 struct CategorizedTxs {
     spore_txs: Vec<SporeTx>,
-    xudt_txs: Vec<XudtTx>,
+    xudt_txs: Vec<TransactionView>,
     rgbpp_txs: Vec<TransactionView>,
     inscription_txs: Vec<TransactionView>,
 }
@@ -69,19 +78,52 @@ impl CategorizedTxs {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv()?;
+// 使用 SmallVec 优化小数组的性能
+type CategoryVec = SmallVec<[TxCategory; 4]>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TxCategory {
+    Spore,
+    Xudt,
+    Rgbpp,
+    Inscription,
+}
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<()> {
+    setup_environment()?;
+    let config = load_config()?;
+    setup_logging(&config)?;
+
+    info!("config: {config:#?}");
+
+    let db = setup_database(&config).await?;
+    let client = setup_fetcher(&config)?;
+
+    let (initial_height, network, constants) = initialize_blockchain_data(&db, &config).await?;
+
+    let mut indexer = Indexer::new(initial_height, &config, client, network, constants, db);
+    indexer.run().await?;
+
+    Ok(())
+}
+
+fn setup_environment() -> Result<()> {
+    dotenvy::dotenv()?;
+    Ok(())
+}
+
+fn load_config() -> Result<Config> {
     let config: Config = Figment::new()
         .join(Toml::file("unistate.toml"))
         .merge(figment::providers::Env::raw().only(&["DATABASE_URL"]))
         .extract()?;
+    Ok(config)
+}
 
+fn setup_logging(config: &Config) -> Result<()> {
     let config_level: tracing::Level = config.unistate.optional_config.level.into();
-
     let filter = FilterFn::new(move |metadata| metadata.level() <= &config_level);
-
     let layer = tracing_subscriber::fmt::layer()
         .without_time()
         .with_level(true);
@@ -90,135 +132,154 @@ async fn main() -> anyhow::Result<()> {
         .with(layer.with_filter(filter))
         .init();
 
-    info!("config: {config:#?}");
+    Ok(())
+}
 
+async fn setup_database(config: &Config) -> Result<DbConn> {
     let opt = ConnectOptions::new(&config.database_url);
     let db = Database::connect(opt).await?;
+    Ok(db)
+}
 
-    let client = fetcher::Fetcher::from_config(&config.unistate)?;
+fn setup_fetcher(config: &Config) -> Result<fetcher::Fetcher<HttpClient>> {
+    Ok(fetcher::Fetcher::from_config(&config.unistate)?)
+}
 
-    let block_height_value = block_height::Entity::find().one(&db).await?.unwrap().height as u64;
+async fn initialize_blockchain_data(
+    db: &DbConn,
+    config: &Config,
+) -> Result<(u64, NetworkType, constants::Constants)> {
+    let block_height_value = block_height::Entity::find().one(db).await?.unwrap().height as u64;
     let network = config.unistate.optional_config.network;
     let constants = constants::Constants::from_config(network);
 
-    let mut height = config
+    let initial_height = config
         .unistate
         .optional_config
         .initial_height
         .max(block_height_value);
 
-    let initial_target = client.get_tip_block_number().await?.value();
-    let max_batch_size = config.unistate.optional_config.batch_size;
-    let interval = config.unistate.optional_config.interval;
-    let mut batch_size = (initial_target - height).min(max_batch_size);
-    let mut target_height = initial_target;
-    let mut pre_handle = None;
-    let mut handles = JoinSet::new();
-    let fetch_size = config.unistate.optional_config.fetch_size;
-    loop {
-        info!("Fetching batch: {batch_size} items | Progress: {height}/{target_height}");
+    Ok((initial_height, network, constants))
+}
 
-        let numbers = (0..batch_size)
+struct Indexer {
+    height: u64,
+    target_height: u64,
+    batch_size: u64,
+    max_batch_size: u64,
+    interval: f32,
+    fetch_size: usize,
+    client: fetcher::Fetcher<HttpClient>,
+    db: DbConn,
+    constants: constants::Constants,
+    network: NetworkType,
+}
+
+impl Indexer {
+    fn new(
+        initial_height: u64,
+        config: &Config,
+        client: fetcher::Fetcher<HttpClient>,
+        network: NetworkType,
+        constants: constants::Constants,
+        db: DbConn,
+    ) -> Self {
+        let max_batch_size = config.unistate.optional_config.batch_size;
+        let interval = config.unistate.optional_config.interval;
+        let fetch_size = config.unistate.optional_config.fetch_size;
+
+        Self {
+            height: initial_height,
+            target_height: 0,
+            batch_size: 0,
+            max_batch_size,
+            interval,
+            fetch_size,
+            client,
+            db,
+            constants,
+            network,
+        }
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        self.update_target_height().await?;
+
+        let mut pre_handle = None;
+        let mut handles = JoinSet::new();
+
+        loop {
+            self.log_progress();
+            let numbers = self.get_block_numbers();
+            self.update_height();
+
+            let (database_processor, op_sender, commited) =
+                DatabaseProcessor::new(self.db.clone(), self.height);
+            let processor_handle = tokio::spawn(database_processor.handle());
+
+            let handle = self.spawn_indexing_task(numbers, op_sender, commited, pre_handle.take());
+            handles.spawn(handle);
+
+            pre_handle = Some(processor_handle);
+
+            self.manage_handles(&mut handles).await?;
+
+            if self.batch_size == 0 {
+                self.update_target_height().await?;
+            }
+
+            tokio::time::sleep(Duration::from_secs_f32(self.interval)).await;
+        }
+    }
+
+    fn log_progress(&self) {
+        info!(
+            "Fetching batch: {} items | Progress: {}/{}",
+            self.batch_size, self.height, self.target_height
+        );
+    }
+
+    fn get_block_numbers(&self) -> Vec<BlockNumber> {
+        (0..self.batch_size)
             .into_par_iter()
-            .map(|i| BlockNumber::from(height + i))
-            .collect::<Vec<_>>();
+            .map(|i| BlockNumber::from(self.height + i))
+            .collect()
+    }
 
-        height += batch_size;
-        batch_size = (target_height - height).min(max_batch_size);
+    fn update_height(&mut self) {
+        self.height += self.batch_size;
+        self.batch_size = (self.target_height - self.height).min(self.max_batch_size);
+    }
 
-        let blocks = client.get_blocks(numbers).await?;
+    async fn update_target_height(&mut self) -> Result<()> {
+        let new_target = self.client.get_tip_block_number().await?.value();
+        if new_target != self.target_height {
+            self.target_height = new_target;
+            self.batch_size = (self.target_height - self.height).min(self.max_batch_size);
+        }
+        Ok(())
+    }
 
-        let (database_processor, op_sender, commited) = DatabaseProcessor::new(db.clone(), height);
+    fn spawn_indexing_task(
+        &self,
+        numbers: Vec<BlockNumber>,
+        op_sender: mpsc::UnboundedSender<Operations>,
+        commited: oneshot::Sender<()>,
+        pre_handle: Option<JoinHandle<Result<()>>>,
+    ) -> impl Future<Output = Result<()>> {
+        let fetcher = self.client.clone();
+        let constants = self.constants;
+        let network = self.network;
 
-        let processor_handle = tokio::spawn(database_processor.handle());
+        async move {
+            let categorized_txs =
+                fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
+            let committed_txs = fetch_committed_transactions(&fetcher, &categorized_txs).await?;
+            let categorized_txs = process_categorized_transactions(categorized_txs, &committed_txs);
 
-        let fetcher = client.clone();
+            index_transactions(categorized_txs, network, op_sender, fetcher).await?;
 
-        let pre_handle_take = pre_handle.take();
-        handles.spawn(async move {
-            let categorized_txs = blocks
-                .into_par_iter()
-                .fold(CategorizedTxs::new, |acc, block| {
-                    let new =
-                        block
-                            .transactions
-                            .into_par_iter()
-                            .fold(CategorizedTxs::new, move |mut categorized, tx| {
-                                let rgbpp = tx.inner.cell_deps.par_iter().any(|cd| {
-                                    constants.rgbpp_lock_dep().out_point.eq(&cd.out_point)
-                                });
-
-                                let spore = tx
-                                    .inner
-                                    .cell_deps
-                                    .par_iter()
-                                    .any(|cd| constants.is_spore(cd));
-
-                                let xudt = tx.inner.cell_deps.par_iter().any(|cd| {
-                                    constants.xudt_type_dep().out_point.eq(&cd.out_point)
-                                });
-
-                                let inscription = tx.inner.cell_deps.par_iter().any(|cd| {
-                                    constants.inscription_info_dep().out_point.eq(&cd.out_point)
-                                });
-
-                                if spore {
-                                    categorized.spore_txs.push(SporeTx {
-                                        tx: tx.clone(),
-                                        timestamp: block.header.inner.timestamp.value(),
-                                    });
-                                }
-
-                                if xudt {
-                                    categorized.xudt_txs.push(XudtTx { tx: tx.clone() });
-                                }
-
-                                if rgbpp {
-                                    categorized.rgbpp_txs.push(tx.clone());
-                                }
-
-                                if inscription {
-                                    categorized.inscription_txs.push(tx);
-                                }
-
-                                categorized
-                            })
-                            .reduce(CategorizedTxs::new, |pre, next| pre.merge(next));
-                    acc.merge(new)
-                })
-                .reduce(CategorizedTxs::new, |acc, txs| acc.merge(txs));
-
-            let CategorizedTxs {
-                spore_txs,
-                xudt_txs,
-                rgbpp_txs,
-                inscription_txs,
-            } = categorized_txs;
-
-            let spore_idxer = spore::SporeIndexer::new(spore_txs, network, op_sender.clone());
-
-            spore_idxer.index()?;
-
-            tracing::debug!("drop spore idxer");
-
-            let xudt_idxer = xudt::XudtIndexer::new(xudt_txs, network, op_sender.clone());
-
-            xudt_idxer.index()?;
-
-            tracing::debug!("drop xudt idxer");
-
-            let rgbpp_idxer = rgbpp::RgbppIndexer::new(rgbpp_txs, fetcher, op_sender.clone());
-
-            rgbpp_idxer.index().await?;
-
-            tracing::debug!("drop rgbpp idxer");
-
-            let inscription_idxer =
-                inscription::InscriptionInfoIndexer::new(inscription_txs, network, op_sender);
-
-            inscription_idxer.index()?;
-
-            if let Some(pre) = pre_handle_take {
+            if let Some(pre) = pre_handle {
                 pre.await??;
             }
 
@@ -226,34 +287,165 @@ async fn main() -> anyhow::Result<()> {
                 .send(())
                 .map_err(|_| anyhow::anyhow!("commited failed."))?;
 
-            Result::<(), anyhow::Error>::Ok(())
-        });
+            Ok(())
+        }
+    }
 
-        pre_handle = Some(processor_handle);
-
+    async fn manage_handles(&self, handles: &mut JoinSet<Result<()>>) -> Result<()> {
         while let Some(res) = handles.try_join_next() {
             res??;
         }
 
-        let pre_handle_len = handles.len();
-
-        if pre_handle_len >= fetch_size {
+        if handles.len() >= self.fetch_size {
             if let Some(res) = handles.join_next().await {
                 res??;
             }
         }
 
-        if batch_size == 0 {
-            let new_target = client.get_tip_block_number().await?.value();
-            if new_target != target_height {
-                target_height = new_target;
-                batch_size = (target_height - height).min(max_batch_size);
-            } else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-
-        info!("sleeping...");
-        tokio::time::sleep(Duration::from_secs_f32(interval)).await;
+        Ok(())
     }
+}
+
+async fn fetch_and_categorize_transactions(
+    fetcher: &fetcher::Fetcher<HttpClient>,
+    numbers: Vec<BlockNumber>,
+    constants: &constants::Constants,
+) -> Result<Vec<(TransactionView, u64, CategoryVec)>> {
+    let categorize_txs = fetcher
+        .get_blocks(numbers)
+        .await?
+        .into_par_iter()
+        .flat_map(|block| {
+            block.transactions.into_par_iter().filter_map(move |tx| {
+                let categories = categorize_transaction(&tx, constants);
+                if !categories.is_empty() {
+                    Some((tx, block.header.inner.timestamp.value(), categories))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    Ok(categorize_txs)
+}
+
+fn categorize_transaction(tx: &TransactionView, constants: &constants::Constants) -> CategoryVec {
+    tx.inner
+        .cell_deps
+        .par_iter()
+        .fold(SmallVec::new, |mut categories, cd| {
+            if constants.is_spore(cd) {
+                categories.push(TxCategory::Spore);
+            }
+            if constants.xudt_type_dep().out_point.eq(&cd.out_point) {
+                categories.push(TxCategory::Xudt);
+            }
+            if constants.rgbpp_lock_dep().out_point.eq(&cd.out_point) {
+                categories.push(TxCategory::Rgbpp);
+            }
+            if constants.inscription_info_dep().out_point.eq(&cd.out_point) {
+                categories.push(TxCategory::Inscription);
+            }
+            categories
+        })
+        .reduce(SmallVec::new, |mut a, mut b| {
+            a.append(&mut b);
+            a
+        })
+}
+
+async fn fetch_committed_transactions(
+    fetcher: &fetcher::Fetcher<HttpClient>,
+    categorized_txs: &[(TransactionView, u64, CategoryVec)],
+) -> Result<DashMap<H256, TransactionView>> {
+    let tx_hashes: Vec<_> = categorized_txs
+        .par_iter()
+        .map(|(tx, _, _)| tx.hash.clone())
+        .collect();
+
+    let transactions = fetcher.get_txs(tx_hashes).await?;
+
+    Ok(transactions
+        .into_par_iter()
+        .filter_map(|tx| {
+            if tx.tx_status.status == Status::Committed {
+                tx.transaction
+                    .and_then(|t| t.get_value().ok())
+                    .map(|tx_value| (tx_value.hash.clone(), tx_value))
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+fn process_categorized_transactions(
+    categorized_txs: Vec<(TransactionView, u64, CategoryVec)>,
+    committed_txs: &DashMap<H256, TransactionView>,
+) -> CategorizedTxs {
+    categorized_txs
+        .into_par_iter()
+        .fold(
+            CategorizedTxs::new,
+            |mut txs, (original_tx, timestamp, categories)| {
+                if let Some(committed_tx) = committed_txs.get(&original_tx.hash) {
+                    for category in categories {
+                        match category {
+                            TxCategory::Spore => txs.spore_txs.push(SporeTx {
+                                timestamp,
+                                tx: committed_tx.clone(),
+                            }),
+                            TxCategory::Xudt => txs.xudt_txs.push(committed_tx.clone()),
+                            TxCategory::Rgbpp => txs.rgbpp_txs.push(committed_tx.clone()),
+                            TxCategory::Inscription => {
+                                txs.inscription_txs.push(committed_tx.clone())
+                            }
+                        }
+                    }
+                }
+                txs
+            },
+        )
+        .reduce(CategorizedTxs::new, |pre, now| pre.merge(now))
+}
+
+async fn index_transactions(
+    categorized_txs: CategorizedTxs,
+    network: NetworkType,
+    op_sender: mpsc::UnboundedSender<Operations>,
+    fetcher: fetcher::Fetcher<HttpClient>,
+) -> Result<()> {
+    let (spore_sender, xudt_sender, rgbpp_sender) =
+        (op_sender.clone(), op_sender.clone(), op_sender.clone());
+    let (spore_result, xudt_result, rgbpp_result, inscription_result) = tokio::join!(
+        task::spawn_blocking(move || {
+            let spore_idxer =
+                spore::SporeIndexer::new(categorized_txs.spore_txs, network, spore_sender);
+            spore_idxer.index()
+        }),
+        task::spawn_blocking(move || {
+            let xudt_idxer = xudt::XudtIndexer::new(categorized_txs.xudt_txs, network, xudt_sender);
+            xudt_idxer.index()
+        }),
+        task::spawn(async move {
+            let rgbpp_idxer =
+                rgbpp::RgbppIndexer::new(categorized_txs.rgbpp_txs, fetcher, rgbpp_sender);
+            rgbpp_idxer.index().await
+        }),
+        task::spawn_blocking(move || {
+            let inscription_idxer = inscription::InscriptionInfoIndexer::new(
+                categorized_txs.inscription_txs,
+                network,
+                op_sender,
+            );
+            inscription_idxer.index()
+        })
+    );
+
+    spore_result??;
+    xudt_result??;
+    rgbpp_result??;
+    inscription_result??;
+
+    Ok(())
 }
