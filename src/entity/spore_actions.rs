@@ -3,7 +3,7 @@
 use super::sea_orm_active_enums::SporeActionType;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, const_field_count::FieldCount)]
 #[sea_orm(table_name = "spore_actions")]
 pub struct Model {
     #[sea_orm(primary_key)]
