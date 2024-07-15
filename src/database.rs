@@ -41,7 +41,7 @@ const MAX_RETRIES: u32 = 5;
 const RETRY_DELAY_MS: u64 = 500;
 
 macro_rules! define_upsert_function {
-    ($fn_name:ident, $entity:ident, $filed_count:expr, $conflict:expr $(,$merge:ident)?) => {
+    ($fn_name:ident, $entity:ident, $conflict:expr $(,$merge:ident)?) => {
         async fn $fn_name(
             buffer: Vec<$entity::ActiveModel>,
             db: &sea_orm::DatabaseTransaction,
@@ -49,7 +49,7 @@ macro_rules! define_upsert_function {
             $(let buffer = $merge(buffer);)?
             let futs = buffer
                 .into_par_iter()
-                .chunks((u16::MAX / $filed_count) as usize)
+                .chunks(u16::MAX as usize / $entity::Model::field_count())
                 .map(|batch| async move {
                     let mut retry_count = 0;
                     loop {
@@ -83,9 +83,9 @@ macro_rules! define_upsert_function {
 }
 
 macro_rules! define_upsert_functions {
-    ($($fn_name:ident => ($entity:ident, $batch_size:expr, $conflict:expr $(,$merge:ident)?),)*) => {
+    ($($fn_name:ident => ($entity:ident, $conflict:expr $(,$merge:ident)?),)*) => {
         $(
-            define_upsert_function!($fn_name, $entity, $batch_size, $conflict $(,$merge)?);
+            define_upsert_function!($fn_name, $entity, $conflict $(,$merge)?);
         )*
     };
 }
@@ -93,7 +93,6 @@ macro_rules! define_upsert_functions {
 define_upsert_functions! {
     upsert_many_xudt => (
         xudt_cell,
-        10,
         define_conflict!(
             xudt_cell::Column::TransactionHash,
             xudt_cell::Column::TransactionIndex
@@ -102,7 +101,6 @@ define_upsert_functions! {
 
     upsert_many_info => (
         token_info,
-        6,
         define_conflict!(
             token_info::Column::TypeId
         )
@@ -110,7 +108,6 @@ define_upsert_functions! {
 
     upsert_many_status => (
         transaction_outputs_status,
-        4,
         define_conflict!(
             transaction_outputs_status::Column::OutputTransactionHash,
             transaction_outputs_status::Column::OutputTransactionIndex
@@ -119,7 +116,6 @@ define_upsert_functions! {
 
     upsert_many_addresses => (
         addresses,
-        4,
         define_conflict!(
             addresses::Column::Id
         )
@@ -127,7 +123,6 @@ define_upsert_functions! {
 
     upsert_many_clusters => (
         clusters,
-        8,
         define_conflict!(
             clusters::Column::Id => [
                 clusters::Column::OwnerAddress,
@@ -143,7 +138,6 @@ define_upsert_functions! {
 
     upsert_many_spores => (
         spores,
-        8,
         define_conflict!(
             spores::Column::Id => [
                 spores::Column::OwnerAddress,
@@ -159,7 +153,6 @@ define_upsert_functions! {
 
     upsert_many_actions => (
         spore_actions,
-        15,
         define_conflict!(
             spore_actions::Column::Id
         )
@@ -167,7 +160,6 @@ define_upsert_functions! {
 
     upsert_many_locks => (
         rgbpp_locks,
-        4,
         define_conflict!(
             rgbpp_locks::Column::LockId
         )
@@ -175,7 +167,6 @@ define_upsert_functions! {
 
     upsert_many_unlocks => (
         rgbpp_unlocks,
-        7,
         define_conflict!(
             rgbpp_unlocks::Column::UnlockId
         )

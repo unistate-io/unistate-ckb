@@ -2,7 +2,7 @@
 
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, const_field_count::FieldCount)]
 #[sea_orm(table_name = "token_info")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
