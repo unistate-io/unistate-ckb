@@ -33,11 +33,26 @@ const fn const_default_bytes() -> JsonBytes {
     unsafe { std::mem::transmute(src) }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Version {
+    V1,
+    V2,
+}
+
 macro_rules! define_network_item {
     ($item_type:ty, $name:ident, { $network:ident => $expr:expr $(,)? }) => {
         pub const fn $name(self) -> Option<$item_type> {
             match self {
                 Self::$network => Some($expr),
+                _ => None
+            }
+        }
+    };
+
+    ($item_type:ty, $name:ident, { $(($network:ident, $version:ident) => $expr:expr),+ $(,)? }) => {
+        pub const fn $name(self, version: Version) -> Option<$item_type> {
+            match (self, version) {
+                $((Self::$network, Version::$version) => Some($expr),)*
                 _ => None
             }
         }
@@ -60,6 +75,12 @@ macro_rules! define_cell_dep {
         });
     };
 
+    ($name:ident, $dep_type:expr, $index:expr, { $(($network:ident, $version:ident) => $hash:expr),+ $(,)? }) => {
+        define_network_item!(CellDep, $name, {
+            $(($network, $version) => define_cell_dep!(@internal $dep_type, $hash, $index),)*
+        });
+    };
+
 
     (@internal $dep_type:expr, $dep_tx_hash:expr, $dep_index:expr) => {
         CellDep {
@@ -76,6 +97,12 @@ macro_rules! define_script {
     ($name:ident, $script_hash_type:expr, { $($network:ident => $hash:expr),+ $(,)? }) => {
         define_network_item!(Script, $name, {
             $($network => define_script!(@internal $script_hash_type, $hash, const_default_bytes()),)*
+        });
+    };
+
+    ($name:ident, $script_hash_type:expr, { $(($network:ident, $version:ident) => $hash:expr),+ $(,)? }) => {
+        define_network_item!(Script, $name, {
+            $(($network, $version) => define_script!(@internal $script_hash_type, $hash, const_default_bytes()),)*
         });
     };
 
@@ -102,55 +129,26 @@ impl Constants {
             _ => unimplemented!(),
         }
     }
-    pub fn is_rgbpp_lock_script(self, script: &Script) -> bool {
-        script.code_hash.eq(&self.rgbpp_lock_script().code_hash)
-            && script.hash_type.eq(&self.rgbpp_lock_script().hash_type)
-    }
+}
 
-    pub fn is_btc_time_lock_script(self, script: &Script) -> bool {
-        script.code_hash.eq(&self.btc_time_lock_script().code_hash)
-            && script.hash_type.eq(&self.btc_time_lock_script().hash_type)
-    }
-
-    pub fn get_xudttype_script(self, script: Option<&Script>) -> Option<&Script> {
-        script.filter(|script| {
-            script.code_hash.eq(&self.xudt_type_script().code_hash)
-                && script.hash_type.eq(&self.xudt_type_script().hash_type)
-        })
-    }
-
-    pub fn get_unique_type_script(self, script: Option<&Script>) -> Option<&Script> {
-        script.filter(|script| {
-            script.code_hash.eq(&self.unique_type_script().code_hash)
-                && script.hash_type.eq(&self.unique_type_script().hash_type)
-        })
-    }
-
-    pub fn get_cluster_type_script(self, script: Option<&Script>) -> Option<&Script> {
-        script.filter(|script| {
-            script.code_hash.eq(&self.cluster_type_script().code_hash)
-                && script.hash_type.eq(&self.cluster_type_script().hash_type)
-        })
-    }
-
-    pub fn get_spore_type_script(self, script: Option<&Script>) -> Option<&Script> {
-        script.filter(|script| {
-            script.code_hash.eq(&self.spore_type_script().code_hash)
-                && script.hash_type.eq(&self.spore_type_script().hash_type)
-        })
-    }
+macro_rules! define_versioned_deps {
+    ($self:ident, $($version:ident),*) => {
+        [
+            $(
+                $self.spore_type_dep(Version::$version),
+                $self.cluster_type_dep(Version::$version),
+                $self.cluster_proxy_dep(Version::$version),
+                $self.cluster_agent_dep(Version::$version),
+            )*
+            $self.lua_dep(),
+            $self.mutant_dep(),
+        ]
+    };
 }
 
 impl Constants {
-    pub const fn spore_deps(self) -> [Option<CellDep>; 6] {
-        [
-            Some(self.spore_type_dep()),
-            Some(self.cluster_type_dep()),
-            self.cluster_proxy_dep(),
-            self.cluster_agent_dep(),
-            self.lua_dep(),
-            self.mutant_dep(),
-        ]
+    pub const fn spore_deps(self) -> [Option<CellDep>; 10] {
+        define_versioned_deps!(self, V1, V2)
     }
 
     pub fn is_spore(self, cd: &CellDep) -> bool {
@@ -159,22 +157,6 @@ impl Constants {
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
     }
-
-    define_script!(
-        cluster_proxy_type_script,
-        ScriptHashType::Data1,
-        {
-            Testnet => "4349889bda064adab8f49f7dd8810d217917f7df28e9b2a1df0b74442399670a",
-        }
-    );
-
-    define_script!(
-        cluster_agent_type_script,
-        ScriptHashType::Data1,
-        {
-            Testnet => "923e997654b2697ee3f77052cb884e98f28799a4270fd412c3edb8f3987ca622",
-        }
-    );
 
     define_script!(
         mutant_type_script,
@@ -189,24 +171,6 @@ impl Constants {
         ScriptHashType::Data1,
         {
             Testnet => "ed08faee8c29b7a7c29bd9d495b4b93cc207bd70ca93f7b356f39c677e7ab0fc",
-        }
-    );
-
-    define_cell_dep!(
-        cluster_proxy_dep,
-        DepType::Code,
-        0x0,
-        {
-            Testnet => "c5a41d58155b11ecd87a5a49fdcb6e83bd6684d3b72b2f3686f081945461c156",
-        }
-    );
-
-    define_cell_dep!(
-        cluster_agent_dep,
-        DepType::Code,
-        0x0,
-        {
-            Testnet => "52210232292d10c51b48e72a2cea60d8f0a08c2680a97a8ee7ca0a39379f0036",
         }
     );
 
@@ -434,8 +398,9 @@ impl Constants {
         cluster_type_script,
         ScriptHashType::Data1,
         {
-            Testnet => "0bbe768b519d8ea7b96d58f1182eb7e6ef96c541fbd9526975077ee09f049058",
-            Mainnet => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075"
+            (Testnet,V1) => "fbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd",
+            (Testnet,V2) => "0bbe768b519d8ea7b96d58f1182eb7e6ef96c541fbd9526975077ee09f049058",
+            (Mainnet,V1) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075"
         }
     );
 
@@ -443,8 +408,9 @@ impl Constants {
         spore_type_script,
         ScriptHashType::Data1,
         {
-            Testnet => "685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d",
-            Mainnet => "4a4dce1df3dffff7f8b2cd7dff7303df3b6150c9788cb75dcf6747247132b9f5"
+            (Testnet,V1) => "5e063b4c0e7abeaa6a428df3b693521a3050934cf3b0ae97a800d1bc31449398",
+            (Testnet,V2) => "685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d",
+            (Mainnet,V1) => "4a4dce1df3dffff7f8b2cd7dff7303df3b6150c9788cb75dcf6747247132b9f5"
         }
     );
 
@@ -453,8 +419,9 @@ impl Constants {
         DepType::Code,
         0x0,
         {
-            Testnet => "5e8d2a517d50fd4bb4d01737a7952a1f1d35c8afc77240695bb569cd7d9d5a1f",
-            Mainnet => "96b198fb5ddbd1eed57ed667068f1f1e55d07907b4c0dbd38675a69ea1b69824"
+            (Testnet,V1) => "06995b9fc19461a2bf9933e57b69af47a20bf0a5bc6c0ffcb85567a2c733f0a1",
+            (Testnet,V2) => "5e8d2a517d50fd4bb4d01737a7952a1f1d35c8afc77240695bb569cd7d9d5a1f",
+            (Mainnet,V1) => "96b198fb5ddbd1eed57ed667068f1f1e55d07907b4c0dbd38675a69ea1b69824"
         }
     );
 
@@ -463,8 +430,9 @@ impl Constants {
         DepType::Code,
         0x0,
         {
-            Testnet => "cebb174d6e300e26074aea2f5dbd7f694bb4fe3de52b6dfe205e54f90164510a",
-            Mainnet => "e464b7fb9311c5e2820e61c99afc615d6b98bdefbe318c34868c010cbd0dc938"
+            (Testnet,V1) => "fbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd",
+            (Testnet,V2) => "cebb174d6e300e26074aea2f5dbd7f694bb4fe3de52b6dfe205e54f90164510a",
+            (Mainnet,V1) => "e464b7fb9311c5e2820e61c99afc615d6b98bdefbe318c34868c010cbd0dc938"
         }
     );
 
@@ -483,6 +451,44 @@ impl Constants {
         {
             Testnet => "00cdf8fab0f8ac638758ebf5ea5e4052b1d71e8a77b9f43139718621f6849326",
             Mainnet => "70d64497a075bd651e98ac030455ea200637ee325a12ad08aff03f1a117e5a62"
+        }
+    );
+
+    define_script!(
+        cluster_agent_type_script,
+        ScriptHashType::Data1,
+        {
+            (Testnet, V1) => "c986099b41d79ca1b2a56ce5874bcda8175440a17298ea5e2bbc3897736b8c21",
+            (Testnet, V2) => "923e997654b2697ee3f77052cb884e98f28799a4270fd412c3edb8f3987ca622",
+        }
+    );
+
+    define_script!(
+        cluster_proxy_type_script,
+        ScriptHashType::Data1,
+        {
+            (Testnet, V1) => "be8b9ce3d05a32c4bb26fe71cd5fc1407ce91e3a8b9e8719be2ab072cef1454b",
+            (Testnet, V2) => "4349889bda064adab8f49f7dd8810d217917f7df28e9b2a1df0b74442399670a",
+        }
+    );
+
+    define_cell_dep!(
+        cluster_agent_dep,
+        DepType::Code,
+        0x0,
+        {
+            (Testnet, V1) => "53fdb9366637434ff685d0aca5e2a68a859b6fcaa4b608a7ecca0713fed0f5b7",
+            (Testnet, V2) => "52210232292d10c51b48e72a2cea60d8f0a08c2680a97a8ee7ca0a39379f0036",
+        }
+    );
+
+    define_cell_dep!(
+        cluster_proxy_dep,
+        DepType::Code,
+        0x0,
+        {
+            (Testnet, V1) => "0231ea581bbc38965e10a2659da326ae840c038a9d0d6849f458b51d94870104",
+            (Testnet, V2) => "c5a41d58155b11ecd87a5a49fdcb6e83bd6684d3b72b2f3686f081945461c156",
         }
     );
 }
