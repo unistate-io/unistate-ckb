@@ -3,7 +3,6 @@ use ckb_jsonrpc_types::TransactionView;
 use ckb_sdk::NetworkType;
 use ckb_types::prelude::Entity as _;
 use ckb_types::{packed, H256};
-use hex::encode;
 use molecule::prelude::Entity as _;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator as _};
 use sea_orm::Set;
@@ -140,43 +139,6 @@ fn upsert_inscription_info(
     Ok(())
 }
 
-#[cfg(test)]
-fn serialize_inscription_info(info: &InscriptionInfo) -> String {
-    fn u8_to_hex(value: u8) -> String {
-        format!("{:02x}", value)
-    }
-
-    fn u128_to_le(value: u128) -> String {
-        encode(value.to_le_bytes())
-    }
-
-    fn utf8_to_hex(s: &str) -> String {
-        encode(s.as_bytes())
-    }
-
-    let mut ret = u8_to_hex(info.decimal);
-
-    let name = utf8_to_hex(&info.name);
-    ret.push_str(&u8_to_hex((name.len() / 2) as u8));
-    ret.push_str(&name);
-
-    let symbol = utf8_to_hex(&info.symbol);
-    ret.push_str(&u8_to_hex((symbol.len() / 2) as u8));
-    ret.push_str(&symbol);
-
-    ret.push_str(&encode(info.xudt_hash));
-
-    let max_supply = info.max_supply * 10u128.pow(info.decimal as u32);
-    ret.push_str(&u128_to_le(max_supply));
-
-    let mint_limit = info.mint_limit * 10u128.pow(info.decimal as u32);
-    ret.push_str(&u128_to_le(mint_limit));
-
-    ret.push_str(&u8_to_hex(info.mint_status));
-
-    ret
-}
-
 #[derive(Error, Debug)]
 pub enum InscriptionError {
     #[error("Invalid UTF-8 in name")]
@@ -246,7 +208,45 @@ fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, Inscript
 
 #[cfg(test)]
 mod tests {
+    use hex::encode;
+
     use super::*;
+
+    fn serialize_inscription_info(info: &InscriptionInfo) -> String {
+        fn u8_to_hex(value: u8) -> String {
+            format!("{:02x}", value)
+        }
+
+        fn u128_to_le(value: u128) -> String {
+            encode(value.to_le_bytes())
+        }
+
+        fn utf8_to_hex(s: &str) -> String {
+            encode(s.as_bytes())
+        }
+
+        let mut ret = u8_to_hex(info.decimal);
+
+        let name = utf8_to_hex(&info.name);
+        ret.push_str(&u8_to_hex((name.len() / 2) as u8));
+        ret.push_str(&name);
+
+        let symbol = utf8_to_hex(&info.symbol);
+        ret.push_str(&u8_to_hex((symbol.len() / 2) as u8));
+        ret.push_str(&symbol);
+
+        ret.push_str(&encode(info.xudt_hash));
+
+        let max_supply = info.max_supply * 10u128.pow(info.decimal as u32);
+        ret.push_str(&u128_to_le(max_supply));
+
+        let mint_limit = info.mint_limit * 10u128.pow(info.decimal as u32);
+        ret.push_str(&u128_to_le(mint_limit));
+
+        ret.push_str(&u8_to_hex(info.mint_status));
+
+        ret
+    }
 
     #[test]
     fn test_serialize_deserialize() {

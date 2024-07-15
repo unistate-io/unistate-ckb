@@ -7,16 +7,6 @@ pub struct TokenInfo {
     pub symbol: String,
 }
 
-pub fn decode_token_info(hex_string: &str) -> Result<TokenInfo, Error> {
-    // Remove "0x" prefix and decode hex string into a byte array
-    let bytes = hex::decode(hex_string.trim_start_matches("0x"))
-        .map_err(|_| anyhow!("Invalid hex string"))?;
-
-    let info = decode_token_info_bytes(&bytes)?;
-
-    Ok(info)
-}
-
 pub fn decode_token_info_bytes(bytes: &[u8]) -> Result<TokenInfo, Error> {
     // Check if the byte array has at least 3 bytes (decimal, name size, and symbol size)
     if bytes.len() < 3 {
@@ -60,6 +50,16 @@ pub fn decode_token_info_bytes(bytes: &[u8]) -> Result<TokenInfo, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_token_info(hex_string: &str) -> Result<TokenInfo, Error> {
+        // Remove "0x" prefix and decode hex string into a byte array
+        let bytes = hex::decode(hex_string.trim_start_matches("0x"))
+            .map_err(|_| anyhow!("Invalid hex string"))?;
+
+        let info = decode_token_info_bytes(&bytes)?;
+
+        Ok(info)
+    }
 
     fn encode_token_info(token_info: &TokenInfo) -> String {
         let decimal = format!("{:02x}", token_info.decimal);

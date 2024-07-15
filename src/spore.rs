@@ -219,6 +219,7 @@ impl action::SporeActionUnion {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn from_address_id(&self, network: ckb_sdk::NetworkType) -> Option<String> {
         self.from_address()
             .map(|address| address.to_string(network))
@@ -228,6 +229,7 @@ impl action::SporeActionUnion {
         self.to_address().map(|address| address.to_string(network))
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn from_address(&self) -> Option<action::AddressUnion> {
         match self {
             action::SporeActionUnion::MintSpore(_) => None,
@@ -317,6 +319,7 @@ impl spore_v1::SporeData {
 }
 
 impl spore_v1::Bytes {
+    #[allow(clippy::wrong_self_convention)]
     pub fn into_string(&self) -> String {
         let res = String::from_utf8(self.raw_data().to_vec());
         match res {

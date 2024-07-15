@@ -57,7 +57,7 @@ fn process_witnesses<const IS_INPUT: bool>(
                             .raw_extension_data()
                             .to_opt()
                             .map(|esc| esc.as_slice())
-                            .map(|raw| blake160(raw))
+                            .map(blake160)
                             .map(|key| (key, xudt_witness_input.to_entity()))
                     })
             })
@@ -253,46 +253,43 @@ fn parse_xudt(
         raw_onwer_lock_script_hash.map(|raw| std::array::from_fn::<u8, 32, _>(|i| raw[i]));
     debug!("Owner lock script hash: {:?}", owner_lock_script_hash);
 
-    let xudt_args = raw_xudt_args
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| {
-            let (mut flags, ext_data) = split_at_checked(raw, 4)?;
-            debug!("Flags: {:?}", flags);
-            debug!("Extension data: {:?}", ext_data);
+    let xudt_args = raw_xudt_args.filter(|raw| !raw.is_empty()).and_then(|raw| {
+        let (mut flags, ext_data) = split_at_checked(raw, 4)?;
+        debug!("Flags: {:?}", flags);
+        debug!("Extension data: {:?}", ext_data);
 
-            let flags = flags.get_u32_le();
-            debug!("Flags: {}", flags);
+        let flags = flags.get_u32_le();
+        debug!("Flags: {}", flags);
 
-            let ext_data = match flags & 0x1FFFFFFF {
-                0 => {
-                    debug!("No extension");
-                    None
+        let ext_data = match flags & 0x1FFFFFFF {
+            0 => {
+                debug!("No extension");
+                None
+            }
+            0x1 => match ScriptVec::from_slice(ext_data) {
+                Ok(sv) => {
+                    debug!("Script vec: {:?}", sv);
+                    Some(sv)
                 }
-                0x1 => match ScriptVec::from_slice(ext_data) {
-                    Ok(sv) => {
-                        debug!("Script vec: {:?}", sv);
-                        Some(sv)
-                    }
-                    Err(e) => {
-                        debug!("Failed to parse script vec: {:?}", e);
-                        unreachable!()
-                    }
-                },
-                0x2 => {
-                    let hash = H160(std::array::from_fn::<u8, 20, _>(|i| ext_data[i]));
-                    debug!("Hash: {:?}", hash);
-                    maps.get(&hash)
-                        .and_then(|witness| witness.raw_extension_data().to_opt())
-                }
-                _ => {
-                    debug!("Unknown flags!");
+                Err(e) => {
+                    debug!("Failed to parse script vec: {:?}", e);
                     unreachable!()
                 }
-            };
-            debug!("Extension data: {:?}", ext_data);
-            ext_data
-        })
-        .flatten();
+            },
+            0x2 => {
+                let hash = H160(std::array::from_fn::<u8, 20, _>(|i| ext_data[i]));
+                debug!("Hash: {:?}", hash);
+                maps.get(&hash)
+                    .and_then(|witness| witness.raw_extension_data().to_opt())
+            }
+            _ => {
+                debug!("Unknown flags!");
+                unreachable!()
+            }
+        };
+        debug!("Extension data: {:?}", ext_data);
+        ext_data
+    });
     debug!("Xudt args: {:?}", xudt_args);
     let xudt = Xudt {
         amount,

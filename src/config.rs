@@ -57,14 +57,14 @@ pub(crate) enum Level {
     Error,
 }
 
-impl Into<tracing::Level> for Level {
-    fn into(self) -> tracing::Level {
-        match self {
-            Level::Trace => tracing::Level::TRACE,
-            Level::Debug => tracing::Level::DEBUG,
-            Level::Info => tracing::Level::INFO,
-            Level::Warn => tracing::Level::WARN,
-            Level::Error => tracing::Level::ERROR,
+impl From<Level> for tracing::Level {
+    fn from(val: Level) -> Self {
+        match val {
+            Level::Trace => Self::TRACE,
+            Level::Debug => Self::DEBUG,
+            Level::Info => Self::INFO,
+            Level::Warn => Self::WARN,
+            Level::Error => Self::ERROR,
         }
     }
 }
