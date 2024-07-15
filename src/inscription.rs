@@ -142,6 +142,18 @@ fn upsert_inscription_info(
 
 #[cfg(test)]
 fn serialize_inscription_info(info: &InscriptionInfo) -> String {
+    fn u8_to_hex(value: u8) -> String {
+        format!("{:02x}", value)
+    }
+
+    fn u128_to_le(value: u128) -> String {
+        encode(value.to_le_bytes())
+    }
+
+    fn utf8_to_hex(s: &str) -> String {
+        encode(s.as_bytes())
+    }
+
     let mut ret = u8_to_hex(info.decimal);
 
     let name = utf8_to_hex(&info.name);
@@ -230,18 +242,6 @@ fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, Inscript
         mint_limit,
         mint_status,
     })
-}
-
-fn u8_to_hex(value: u8) -> String {
-    format!("{:02x}", value)
-}
-
-fn u128_to_le(value: u128) -> String {
-    encode(value.to_le_bytes())
-}
-
-fn utf8_to_hex(s: &str) -> String {
-    encode(s.as_bytes())
 }
 
 #[cfg(test)]
