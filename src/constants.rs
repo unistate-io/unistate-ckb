@@ -160,6 +160,46 @@ impl Constants {
             .any(|dep| dep.out_point.eq(&cd.out_point))
     }
 
+    pub const fn spore_types(self) -> [Option<Script>; 3] {
+        macro_rules! define_versioned_spore_types {
+            ($self:ident, $($version:ident),*) => {
+                [
+                    $(
+                        $self.spore_type_script(Version::$version),
+                    )*
+                ]
+            };
+        }
+        define_versioned_spore_types!(self, V0, V1, V2)
+    }
+
+    pub const fn cluster_types(self) -> [Option<Script>; 3] {
+        macro_rules! define_versioned_spore_types {
+            ($self:ident, $($version:ident),*) => {
+                [
+                    $(
+                        $self.cluster_type_script(Version::$version),
+                    )*
+                ]
+            };
+        }
+        define_versioned_spore_types!(self, V0, V1, V2)
+    }
+
+    pub fn is_spore_type(self, hash: &H256) -> bool {
+        self.spore_types()
+            .into_par_iter()
+            .flatten()
+            .any(|s| s.code_hash.eq(hash))
+    }
+
+    pub fn is_cluster_type(self, hash: &H256) -> bool {
+        self.cluster_types()
+            .into_par_iter()
+            .flatten()
+            .any(|s| s.code_hash.eq(hash))
+    }
+
     define_script!(
         mutant_type_script,
         ScriptHashType::Data1,

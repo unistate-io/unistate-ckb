@@ -6,9 +6,11 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, const_field_count::FieldCount)]
 #[sea_orm(table_name = "spore_actions")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i32,
-    #[sea_orm(column_type = "VarBinary(StringLen::None)")]
+    #[sea_orm(
+        primary_key,
+        auto_increment = false,
+        column_type = "VarBinary(StringLen::None)"
+    )]
     pub tx: Vec<u8>,
     pub action_type: SporeActionType,
     #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
@@ -21,14 +23,6 @@ pub struct Model {
     pub to_address_id: Option<String>,
     #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
     pub data_hash: Option<Vec<u8>>,
-    pub content_type: Option<String>,
-    #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
-    pub content: Option<Vec<u8>>,
-    pub cluster_name: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub cluster_description: Option<String>,
-    #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
-    pub mutant_id: Option<Vec<u8>>,
     pub created_at: DateTime,
 }
 
