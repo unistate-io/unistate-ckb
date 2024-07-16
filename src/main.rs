@@ -132,17 +132,35 @@ fn setup_logging(config: &Config) -> Result<()> {
 
     Ok(())
 }
-
 async fn setup_database(config: &Config) -> Result<DbConn> {
     let mut opt = ConnectOptions::new(&config.database_url);
     let pool = &config.pool;
-    opt.max_connections(pool.max_connections) // 设置最大连接数
-        .min_connections(pool.min_connections) // 设置最小连接数
-        .connect_timeout(Duration::from_secs(pool.connection_timeout))
-        .acquire_timeout(Duration::from_secs(pool.acquire_timeout))
-        .idle_timeout(Duration::from_secs(pool.idle_timeout))
-        .max_lifetime(Duration::from_secs(pool.max_lifetime))
-        .sqlx_logging(pool.sqlx_logging);
+
+    if let Some(max_connections) = pool.max_connections {
+        opt.max_connections(max_connections);
+    }
+
+    if let Some(min_connections) = pool.min_connections {
+        opt.min_connections(min_connections);
+    }
+
+    if let Some(connection_timeout) = pool.connection_timeout {
+        opt.connect_timeout(Duration::from_secs(connection_timeout));
+    }
+
+    if let Some(acquire_timeout) = pool.acquire_timeout {
+        opt.acquire_timeout(Duration::from_secs(acquire_timeout));
+    }
+
+    if let Some(idle_timeout) = pool.idle_timeout {
+        opt.idle_timeout(Duration::from_secs(idle_timeout));
+    }
+
+    if let Some(max_lifetime) = pool.max_lifetime {
+        opt.max_lifetime(Duration::from_secs(max_lifetime));
+    }
+
+    opt.sqlx_logging(pool.sqlx_logging);
 
     let db = Database::connect(opt).await?;
     Ok(db)
