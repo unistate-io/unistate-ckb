@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bigdecimal::num_bigint::BigInt;
 use ckb_jsonrpc_types::{CellOutput, JsonBytes, TransactionView};
 use ckb_sdk::{util::blake160, NetworkType};
-use ckb_types::{packed, H160, H256};
+use ckb_types::{H160, H256};
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
@@ -90,20 +90,14 @@ fn upsert_xudt(
         lock_script,
     } = xudt;
 
-    use ckb_types::prelude::Entity as _;
-
     let type_id = crate::spore::upsert_address(
-        &action::AddressUnion::Script(action::Script::new_unchecked(
-            packed::Script::from(type_script).as_bytes(),
-        )),
+        &action::AddressUnion::from_json_script(type_script),
         network,
         op_sender.clone(),
     )?;
 
     let lock_id = crate::spore::upsert_address(
-        &action::AddressUnion::Script(action::Script::new_unchecked(
-            packed::Script::from(lock_script).as_bytes(),
-        )),
+        &action::AddressUnion::from_json_script(lock_script),
         network,
         op_sender.clone(),
     )?;
