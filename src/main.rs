@@ -135,13 +135,14 @@ fn setup_logging(config: &Config) -> Result<()> {
 
 async fn setup_database(config: &Config) -> Result<DbConn> {
     let mut opt = ConnectOptions::new(&config.database_url);
-    opt.max_connections(100) // 设置最大连接数
-        .min_connections(5) // 设置最小连接数
-        .connect_timeout(Duration::from_secs(8))
-        .acquire_timeout(Duration::from_secs(8))
-        .idle_timeout(Duration::from_secs(8))
-        .max_lifetime(Duration::from_secs(8))
-        .sqlx_logging(false);
+    let pool = &config.pool;
+    opt.max_connections(pool.max_connections) // 设置最大连接数
+        .min_connections(pool.min_connections) // 设置最小连接数
+        .connect_timeout(Duration::from_secs(pool.connection_timeout))
+        .acquire_timeout(Duration::from_secs(pool.acquire_timeout))
+        .idle_timeout(Duration::from_secs(pool.idle_timeout))
+        .max_lifetime(Duration::from_secs(pool.max_lifetime))
+        .sqlx_logging(pool.sqlx_logging);
 
     let db = Database::connect(opt).await?;
     Ok(db)
