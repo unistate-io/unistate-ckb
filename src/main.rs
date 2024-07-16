@@ -250,6 +250,7 @@ impl Indexer {
             self.manage_handles(&mut handles).await?;
 
             if self.batch_size == 0 {
+                tokio::time::sleep(Duration::from_secs(6)).await;
                 self.update_target_height().await?;
             }
 
