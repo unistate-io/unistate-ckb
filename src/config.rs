@@ -6,6 +6,8 @@ pub(crate) struct Config {
     pub(crate) unistate: UnistateConfig,
     #[serde(default)]
     pub(crate) database_url: String,
+    #[serde(default)]
+    pub(crate) pool: PoolConfig,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -82,6 +84,32 @@ impl Default for UnistateConfigOptional {
     }
 }
 
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(default)]
+pub(crate) struct PoolConfig {
+    pub(crate) max_connections: u32,
+    pub(crate) min_connections: u32,
+    pub(crate) connection_timeout: u64,
+    pub(crate) acquire_timeout: u64,
+    pub(crate) idle_timeout: u64,
+    pub(crate) max_lifetime: u64,
+    pub(crate) sqlx_logging: bool,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 10,
+            min_connections: 1,
+            connection_timeout: 30,
+            acquire_timeout: 8,
+            idle_timeout: 8,
+            max_lifetime: 8,
+            sqlx_logging: false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use figment::{
@@ -103,6 +131,8 @@ mod tests {
                     network = "Testnet"
                     # auth = { user = "user", password = "password" } 
                     featcher.max_retries = 3
+                    [pool]
+                    max_connections = 11
                 "#,
             )?;
 
@@ -125,6 +155,10 @@ mod tests {
                             max_retries: 3,
                             ..Default::default()
                         }
+                    },
+                    pool: PoolConfig {
+                        max_connections: 11,
+                        ..Default::default()
                     }
                 }
             );
