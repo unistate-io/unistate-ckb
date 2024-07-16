@@ -1,11 +1,9 @@
 use core::time::Duration;
 
-use ckb_jsonrpc_types::{BlockNumber, Status, TransactionView};
+use ckb_jsonrpc_types::{BlockNumber, TransactionView};
 
-use ckb_sdk::{rpc::ResponseFormatGetter, NetworkType};
-use ckb_types::H256;
+use ckb_sdk::NetworkType;
 use config::Config;
-use dashmap::DashMap;
 use database::{DatabaseProcessor, Operations};
 use figment::{
     providers::{Format as _, Toml},
@@ -143,7 +141,7 @@ async fn setup_database(config: &Config) -> Result<DbConn> {
         .acquire_timeout(Duration::from_secs(8))
         .idle_timeout(Duration::from_secs(8))
         .max_lifetime(Duration::from_secs(8))
-        .sqlx_logging(true);
+        .sqlx_logging(false);
 
     let db = Database::connect(opt).await?;
     Ok(db)
@@ -282,8 +280,7 @@ impl Indexer {
         async move {
             let categorized_txs =
                 fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
-            let committed_txs = fetch_committed_transactions(&fetcher, &categorized_txs).await?;
-            let categorized_txs = process_categorized_transactions(categorized_txs, &committed_txs);
+            let categorized_txs = process_categorized_transactions(categorized_txs);
 
             index_transactions(categorized_txs, network, op_sender, fetcher).await?;
 
@@ -362,53 +359,23 @@ fn categorize_transaction(tx: &TransactionView, constants: &constants::Constants
         })
 }
 
-async fn fetch_committed_transactions(
-    fetcher: &fetcher::Fetcher<HttpClient>,
-    categorized_txs: &[(TransactionView, u64, CategoryVec)],
-) -> Result<DashMap<H256, TransactionView>> {
-    let tx_hashes: Vec<_> = categorized_txs
-        .par_iter()
-        .map(|(tx, _, _)| tx.hash.clone())
-        .collect();
-
-    let transactions = fetcher.get_txs(tx_hashes).await?;
-
-    Ok(transactions
-        .into_par_iter()
-        .filter_map(|tx| {
-            if tx.tx_status.status == Status::Committed {
-                tx.transaction
-                    .and_then(|t| t.get_value().ok())
-                    .map(|tx_value| (tx_value.hash.clone(), tx_value))
-            } else {
-                None
-            }
-        })
-        .collect())
-}
-
 fn process_categorized_transactions(
     categorized_txs: Vec<(TransactionView, u64, CategoryVec)>,
-    committed_txs: &DashMap<H256, TransactionView>,
 ) -> CategorizedTxs {
     categorized_txs
         .into_par_iter()
         .fold(
             CategorizedTxs::new,
             |mut txs, (original_tx, timestamp, categories)| {
-                if let Some(committed_tx) = committed_txs.get(&original_tx.hash) {
-                    for category in categories {
-                        match category {
-                            TxCategory::Spore => txs.spore_txs.push(SporeTx {
-                                timestamp,
-                                tx: committed_tx.clone(),
-                            }),
-                            TxCategory::Xudt => txs.xudt_txs.push(committed_tx.clone()),
-                            TxCategory::Rgbpp => txs.rgbpp_txs.push(committed_tx.clone()),
-                            TxCategory::Inscription => {
-                                txs.inscription_txs.push(committed_tx.clone())
-                            }
-                        }
+                for category in categories {
+                    match category {
+                        TxCategory::Spore => txs.spore_txs.push(SporeTx {
+                            timestamp,
+                            tx: original_tx.clone(),
+                        }),
+                        TxCategory::Xudt => txs.xudt_txs.push(original_tx.clone()),
+                        TxCategory::Rgbpp => txs.rgbpp_txs.push(original_tx.clone()),
+                        TxCategory::Inscription => txs.inscription_txs.push(original_tx.clone()),
                     }
                 }
                 txs
