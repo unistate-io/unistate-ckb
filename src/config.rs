@@ -84,7 +84,7 @@ impl Default for UnistateConfigOptional {
     }
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Default)]
 #[serde(default)]
 pub(crate) struct PoolConfig {
     pub(crate) max_connections: Option<u32>,
@@ -94,20 +94,6 @@ pub(crate) struct PoolConfig {
     pub(crate) idle_timeout: Option<u64>,
     pub(crate) max_lifetime: Option<u64>,
     pub(crate) sqlx_logging: bool,
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: None,
-            min_connections: None,
-            connection_timeout: None,
-            acquire_timeout: None,
-            idle_timeout: None,
-            max_lifetime: None,
-            sqlx_logging: false,
-        }
-    }
 }
 
 #[cfg(test)]

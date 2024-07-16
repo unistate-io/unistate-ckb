@@ -302,7 +302,7 @@ impl Indexer {
                 fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
             let categorized_txs = process_categorized_transactions(categorized_txs);
 
-            index_transactions(categorized_txs, network, op_sender, fetcher).await?;
+            index_transactions(categorized_txs, network, constants, op_sender, fetcher).await?;
 
             if let Some(pre) = pre_handle {
                 pre.await??;
@@ -407,6 +407,7 @@ fn process_categorized_transactions(
 async fn index_transactions(
     categorized_txs: CategorizedTxs,
     network: NetworkType,
+    constants: constants::Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
     fetcher: fetcher::Fetcher<HttpClient>,
 ) -> Result<()> {
@@ -414,8 +415,12 @@ async fn index_transactions(
         (op_sender.clone(), op_sender.clone(), op_sender.clone());
     let (spore_result, xudt_result, rgbpp_result, inscription_result) = tokio::join!(
         task::spawn_blocking(move || {
-            let spore_idxer =
-                spore::SporeIndexer::new(categorized_txs.spore_txs, network, spore_sender);
+            let spore_idxer = spore::SporeIndexer::new(
+                categorized_txs.spore_txs,
+                network,
+                constants,
+                spore_sender,
+            );
             spore_idxer.index()
         }),
         task::spawn_blocking(move || {

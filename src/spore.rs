@@ -1,5 +1,5 @@
 use ckb_jsonrpc_types::TransactionView;
-use ckb_types::H256;
+use ckb_types::{packed, H256};
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
@@ -7,11 +7,12 @@ use molecule::{
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator as _, IntoParallelRefIterator, ParallelIterator,
 };
-use sea_orm::{ActiveValue::NotSet, Set};
+use sea_orm::Set;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
 use crate::{
+    constants::Constants,
     database::Operations,
     entity::{self, addresses},
     schemas::{
@@ -28,6 +29,7 @@ pub struct SporeTx {
 pub struct SporeIndexer {
     txs: Vec<SporeTx>,
     network: ckb_sdk::NetworkType,
+    constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 }
 
@@ -35,11 +37,13 @@ impl SporeIndexer {
     pub fn new(
         txs: Vec<SporeTx>,
         network: ckb_sdk::NetworkType,
+        constants: Constants,
         op_sender: mpsc::UnboundedSender<Operations>,
     ) -> Self {
         Self {
             txs,
             network,
+            constants,
             op_sender,
         }
     }
@@ -48,14 +52,49 @@ impl SporeIndexer {
         let Self {
             txs,
             network,
+            constants,
             op_sender,
         } = self;
 
-        txs.into_par_iter()
-            .try_for_each(|tx| index_spore(tx.tx, tx.timestamp, network, op_sender.clone()))?;
+        txs.into_par_iter().try_for_each(|tx| {
+            index_spore(tx.tx, tx.timestamp, network, op_sender.clone(), constants)
+        })?;
 
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+#[tracing_test::traced_test]
+fn debug_index_spore() {
+    let tx: TransactionView = serde_json::from_str(TEST_JSON).expect("deserialize failed.");
+    debug!("tx: {tx:?}");
+    let (sender, mut recver) = mpsc::unbounded_channel();
+    index_spore(
+        tx,
+        0,
+        ckb_sdk::NetworkType::Testnet,
+        sender,
+        Constants::Testnet,
+    )
+    .unwrap();
+    while let Some(op) = recver.blocking_recv() {
+        debug!("op: {op:?}");
+    }
+    debug!("done!");
+}
+
+enum DataVariant {
+    Spore(spore_v1::SporeData),
+    ClusterV2(spore_v2::ClusterDataV2),
+    ClusterV1(spore_v1::ClusterData),
+}
+
+struct Data {
+    id: Vec<u8>,
+    to: action::AddressUnion,
+    variant: DataVariant,
 }
 
 fn index_spore(
@@ -63,78 +102,62 @@ fn index_spore(
     timestamp: u64,
     network: ckb_sdk::NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
+    constants: Constants,
 ) -> anyhow::Result<()> {
-    let actions = extract_actions(&tx);
-
-    if actions.is_empty() {
-        return Ok(());
-    }
-
     debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
 
-    let outpus = tx
-        .inner
+    tx.inner
         .outputs_data
         .par_iter()
-        .filter_map(|output_data| {
-            let spore_data_op =
-                spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes()).ok();
-            let cluster_data_op =
-                spore_v2::ClusterDataV2Reader::from_compatible_slice(output_data.as_bytes()).ok();
-            if spore_data_op.is_none() && cluster_data_op.is_none() {
-                None
-            } else {
-                Some((
-                    spore_data_op.map(|reader| reader.to_entity()),
-                    cluster_data_op.map(|reader| reader.to_entity()),
-                ))
-            }
+        .zip(tx.inner.outputs.par_iter())
+        .filter_map(|(output_data, output_cell)| {
+            output_cell
+                .type_
+                .as_ref()
+                .and_then(|s| s.args.as_bytes().get(..32).map(|v| v.to_vec()))
+                .zip(output_cell.type_.as_ref().map(|s| &s.code_hash))
+                .and_then(|(id, code_hash)| {
+                    if constants.is_spore_type(code_hash) {
+                        spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes())
+                            .ok()
+                            .map(|reader| reader.to_entity())
+                            .map(DataVariant::Spore)
+                    } else if constants.is_cluster_type(code_hash) {
+                        spore_v2::ClusterDataV2Reader::from_compatible_slice(output_data.as_bytes())
+                            .ok()
+                            .map(|reader| reader.to_entity())
+                            .map(DataVariant::ClusterV2)
+                            .or(spore_v1::ClusterDataReader::from_compatible_slice(
+                                output_data.as_bytes(),
+                            )
+                            .ok()
+                            .map(|reader| reader.to_entity())
+                            .map(DataVariant::ClusterV1))
+                    } else {
+                        None
+                    }
+                    .map(|variant| Data {
+                        variant,
+                        to: action::AddressUnion::from_json_script(output_cell.lock.clone()),
+                        id,
+                    })
+                })
         })
-        .collect::<Vec<_>>();
+        .try_for_each(|data| upsert_spores(data, network, timestamp, op_sender.clone()))?;
 
-    actions
+    extract_actions(&tx)
         .into_par_iter()
-        .zip(outpus.into_par_iter())
-        .try_for_each(
-            |(action, (spore_data, cluster_data))| -> anyhow::Result<()> {
-                let (spore_data, cluster_data) =
-                    extract_data(action.action_type(), spore_data, cluster_data);
-
-                upsert_spores(
-                    &action,
-                    spore_data.as_ref(),
-                    cluster_data.as_ref(),
-                    network,
-                    timestamp,
-                    op_sender.clone(),
-                )?;
-
-                insert_action(
-                    action,
-                    spore_data.as_ref(),
-                    cluster_data.as_ref(),
-                    tx.hash.clone(),
-                    network,
-                    timestamp,
-                    op_sender.clone(),
-                )?;
-                Ok(())
-            },
-        )?;
+        .try_for_each(|action| {
+            insert_action(
+                action,
+                tx.hash.clone(),
+                network,
+                timestamp,
+                op_sender.clone(),
+            )
+        })?;
 
     Ok(())
-}
-
-fn extract_data(
-    action: entity::sea_orm_active_enums::SporeActionType,
-    spore_data: Option<spore_v1::SporeData>,
-    cluster_data: Option<spore_v2::ClusterDataV2>,
-) -> (Option<spore_v1::SporeData>, Option<spore_v2::ClusterDataV2>) {
-    use entity::sea_orm_active_enums::SporeActionType::{BurnSpore, MintSpore, TransferSpore};
-    match action {
-        BurnSpore | MintSpore | TransferSpore => (spore_data, None),
-        _ => (None, cluster_data),
-    }
 }
 
 impl action::SporeActionUnion {
@@ -173,8 +196,8 @@ impl action::SporeActionUnion {
         }
     }
 
-    fn cluster_id(&self, spore_data: Option<&spore_v1::SporeData>) -> Option<Vec<u8>> {
-        let action_cluster_id = match self {
+    fn cluster_id(&self) -> Option<Vec<u8>> {
+        match self {
             action::SporeActionUnion::MintSpore(_) => None,
             action::SporeActionUnion::TransferSpore(_) => None,
             action::SporeActionUnion::BurnSpore(_) => None,
@@ -194,11 +217,7 @@ impl action::SporeActionUnion {
                 Some(raw.cluster_id().raw_data().to_vec())
             }
             action::SporeActionUnion::BurnAgent(raw) => Some(raw.cluster_id().raw_data().to_vec()),
-        };
-
-        let spore_data_cluster_id = spore_v1::SporeData::cluster_id_op(spore_data);
-
-        action_cluster_id.xor(spore_data_cluster_id)
+        }
     }
 
     fn proxy_id(&self) -> Option<Vec<u8>> {
@@ -280,6 +299,12 @@ impl action::SporeActionUnion {
 }
 
 impl action::AddressUnion {
+    pub fn from_json_script(script: ckb_jsonrpc_types::Script) -> Self {
+        use ckb_types::prelude::Entity;
+        Self::Script(action::Script::new_unchecked(
+            packed::Script::from(script).as_bytes(),
+        ))
+    }
     fn to_string(&self, network: ckb_sdk::NetworkType) -> String {
         use ckb_types::prelude::Entity as _;
         let script = ckb_gen_types::packed::Script::new_unchecked(self.script().as_bytes());
@@ -295,26 +320,18 @@ impl action::AddressUnion {
 }
 
 impl spore_v1::SporeData {
-    fn content_type_op(op: Option<&Self>) -> Option<String> {
-        debug!("content_type.");
-
-        op.map(|data| data.content_type().into_string())
+    fn content_type_op(&self) -> Option<String> {
+        Some(self.content_type().into_string())
     }
 
-    fn content_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        debug!("content.");
-
-        op.map(|data| data.content().raw_data().to_vec())
+    fn content_op(&self) -> Option<Vec<u8>> {
+        Some(self.content().raw_data().to_vec())
     }
 
-    fn cluster_id_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.and_then(|data| data.cluster_id().to_opt()).map(|bytes| {
-            let id = bytes.raw_data().to_vec();
-
-            debug!("cluster id: {}", hex::encode(&id));
-
-            id
-        })
+    fn cluster_id_op(&self) -> Option<Vec<u8>> {
+        self.cluster_id()
+            .to_opt()
+            .map(|bytes| bytes.raw_data().to_vec())
     }
 }
 
@@ -333,21 +350,28 @@ impl spore_v1::Bytes {
 }
 
 impl spore_v2::ClusterDataV2 {
-    fn description_op(op: Option<&Self>) -> Option<String> {
-        debug!("description.");
-
-        op.map(|data| data.description().into_string())
+    fn description_op(&self) -> Option<String> {
+        Some(self.description().into_string())
     }
 
-    fn name_op(op: Option<&Self>) -> Option<String> {
-        debug!("name.");
-
-        op.map(|data| data.name().into_string())
+    fn name_op(&self) -> Option<String> {
+        Some(self.name().into_string())
     }
 
-    fn mutant_id_op(op: Option<&Self>) -> Option<Vec<u8>> {
-        op.and_then(|data| data.mutant_id().to_opt())
+    fn mutant_id_op(&self) -> Option<Vec<u8>> {
+        self.mutant_id()
+            .to_opt()
             .map(|bytes| bytes.raw_data().to_vec())
+    }
+}
+
+impl spore_v1::ClusterData {
+    fn description_op(&self) -> Option<String> {
+        Some(self.description().into_string())
+    }
+
+    fn name_op(&self) -> Option<String> {
+        Some(self.name().into_string())
     }
 }
 
@@ -379,55 +403,60 @@ pub fn upsert_address(
 }
 
 fn upsert_spores(
-    action: &action::SporeActionUnion,
-    spore_data: Option<&spore_v1::SporeData>,
-    cluster_data: Option<&spore_v2::ClusterDataV2>,
+    data: Data,
     network: ckb_sdk::NetworkType,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    let now = to_timestamp(timestamp);
-
-    let spore_id = action.spore_id();
-
-    let cluster_id = action.cluster_id(spore_data);
-
     use entity::{clusters, spores};
 
-    if let Some(address) = action.to_address() {
-        upsert_address(&address, network, op_sender.clone())?;
-    }
+    let now = to_timestamp(timestamp);
 
-    let to = action.to_address_id(network);
-    let is_burned = to.is_none();
+    let Data { id, to, variant } = data;
+    let to = upsert_address(&to, network, op_sender.clone())?;
 
-    if let Some((cluster_id, cluster_data)) = cluster_id.zip(cluster_data) {
-        let model = clusters::ActiveModel {
-            id: Set(cluster_id.clone()),
-            owner_address: Set(to.clone()),
-            cluster_name: Set(spore_v2::ClusterDataV2::name_op(Some(cluster_data))),
-            cluster_description: Set(spore_v2::ClusterDataV2::description_op(Some(cluster_data))),
-            mutant_id: Set(spore_v2::ClusterDataV2::mutant_id_op(Some(cluster_data))),
-            is_burned: Set(is_burned),
-            created_at: Set(now),
-            updated_at: Set(now),
-        };
+    match variant {
+        DataVariant::Spore(spore_data) => {
+            let model = spores::ActiveModel {
+                id: Set(id),
+                owner_address: Set(Some(to)),
+                content_type: Set(spore_data.content_type_op()),
+                content: Set(spore_data.content_op()),
+                cluster_id: Set(spore_data.cluster_id_op()),
+                is_burned: Set(false),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+            op_sender.send(Operations::UpsertSpores(model))?;
+        }
+        DataVariant::ClusterV2(cluster_data) => {
+            let model = clusters::ActiveModel {
+                id: Set(id),
+                owner_address: Set(Some(to)),
+                cluster_name: Set(cluster_data.name_op()),
+                cluster_description: Set(cluster_data.description_op()),
+                mutant_id: Set(cluster_data.mutant_id_op()),
+                is_burned: Set(false),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
 
-        op_sender.send(Operations::UpsertCluster(model))?;
-    }
+            op_sender.send(Operations::UpsertCluster(model))?;
+        }
+        DataVariant::ClusterV1(cluster_data) => {
+            let model = clusters::ActiveModel {
+                id: Set(id),
+                owner_address: Set(Some(to)),
+                cluster_name: Set(cluster_data.name_op()),
+                cluster_description: Set(cluster_data.description_op()),
+                mutant_id: Set(None),
+                is_burned: Set(false),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
 
-    if let Some(spore_id) = spore_id {
-        let model = spores::ActiveModel {
-            id: Set(spore_id),
-            owner_address: Set(to),
-            content_type: Set(spore_v1::SporeData::content_type_op(spore_data)),
-            content: Set(spore_v1::SporeData::content_op(spore_data)),
-            cluster_id: Set(spore_v1::SporeData::cluster_id_op(spore_data)),
-            is_burned: Set(is_burned),
-            created_at: Set(now),
-            updated_at: Set(now),
-        };
-        op_sender.send(Operations::UpsertSpores(model))?;
+            op_sender.send(Operations::UpsertCluster(model))?;
+        }
     }
 
     Ok(())
@@ -435,8 +464,6 @@ fn upsert_spores(
 
 fn insert_action(
     action: action::SporeActionUnion,
-    spore_data: Option<&spore_v1::SporeData>,
-    cluster_data: Option<&spore_v2::ClusterDataV2>,
     tx: H256,
     network: ckb_sdk::NetworkType,
     timestamp: u64,
@@ -447,20 +474,14 @@ fn insert_action(
     }
 
     let action = entity::spore_actions::ActiveModel {
-        id: NotSet,
         tx: Set(tx.0.to_vec()),
         action_type: Set(action.action_type()),
         spore_id: Set(action.spore_id()),
-        cluster_id: Set(action.cluster_id(spore_data)),
+        cluster_id: Set(action.cluster_id()),
         proxy_id: Set(action.proxy_id()),
         from_address_id: Set(action.from_address_id(network)),
         to_address_id: Set(action.to_address_id(network)),
         data_hash: Set(action.data_hash()),
-        content_type: Set(spore_v1::SporeData::content_type_op(spore_data)),
-        content: Set(spore_v1::SporeData::content_op(spore_data)),
-        cluster_name: Set(spore_v2::ClusterDataV2::name_op(cluster_data)),
-        cluster_description: Set(spore_v2::ClusterDataV2::description_op(cluster_data)),
-        mutant_id: Set(spore_v2::ClusterDataV2::mutant_id_op(cluster_data)),
         created_at: Set(to_timestamp(timestamp)),
     };
 
@@ -486,6 +507,8 @@ fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::Spore
         })
         .collect::<Vec<_>>();
 
+    debug!("msgs: {msgs:?}");
+
     let spore_action = msgs
         .par_iter()
         .map(|msg| {
@@ -498,5 +521,79 @@ fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::Spore
         .flatten_iter()
         .collect::<Vec<_>>();
 
+    debug!("spore_actions: {spore_action:?}");
+
     spore_action
 }
+
+#[cfg(test)]
+const TEST_JSON: &'static str = r#"
+    {
+      "cell_deps": [
+        {
+          "dep_type": "code",
+          "out_point": {
+            "index": "0x0",
+            "tx_hash": "0x49551a20dfe39231e7db49431d26c9c08ceec96a29024eef3acc936deeb2ca76"
+          }
+        },
+        {
+          "dep_type": "dep_group",
+          "out_point": {
+            "index": "0x0",
+            "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+          }
+        }
+      ],
+      "hash": "0xe26621f72bab3875335c15f05707bbe35d293a46a9225e3d75cb098a74af046d",
+      "header_deps": [],
+      "inputs": [
+        {
+          "previous_output": {
+            "index": "0x0",
+            "tx_hash": "0xc9a8c29cdc759ea9efabb89a55f8aa78af464f12f6815a4b305602654fcfc0d3"
+          },
+          "since": "0x0"
+        },
+        {
+          "previous_output": {
+            "index": "0x1",
+            "tx_hash": "0x761ee04342efab229592770679975dd1f0c2c168c1e5cb9ea4389b5d2dea46d6"
+          },
+          "since": "0x0"
+        }
+      ],
+      "outputs": [
+        {
+          "capacity": "0x407290d00",
+          "lock": {
+            "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
+            "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+            "hash_type": "type"
+          },
+          "type": {
+            "args": "0x8b9f893397310a3bbd925cd1c9ab606555675bb2d03f3c5cb934f2ba4ef97e93",
+            "code_hash": "0x598d793defef36e2eeba54a9b45130e4ca92822e1d193671f490950c3b856080",
+            "hash_type": "data1"
+          }
+        },
+        {
+          "capacity": "0x1b10e08116f6",
+          "lock": {
+            "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
+            "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+            "hash_type": "type"
+          },
+          "type": null
+        }
+      ],
+      "outputs_data": [
+        "0x2e0000000c0000001e0000000e000000546573746e65742053706f7265730c00000054657374696e67206f6e6c79",
+        "0x"
+      ],
+      "version": "0x0",
+      "witnesses": [
+        "0x550000001000000055000000550000004100000045c5533a9bc964492fd1beb4e45479bc07f7c4a90405f9bc3708f45d417c84d44163c9190034ed52b605e9505f0e0b6b7dc4b920a84736dd7691a0777db6c4da01",
+        "0x"
+      ]
+    }"#;

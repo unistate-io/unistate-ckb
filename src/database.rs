@@ -16,6 +16,7 @@ pub struct DatabaseProcessor {
     pub db: DbConn,
 }
 
+#[derive(Debug)]
 pub enum Operations {
     UpdateXudtCell(transaction_outputs_status::ActiveModel),
     UpsertTokenInfo(token_info::ActiveModel),
@@ -154,7 +155,7 @@ define_upsert_functions! {
     upsert_many_actions => (
         spore_actions,
         define_conflict!(
-            spore_actions::Column::Id
+            spore_actions::Column::Tx
         )
     ),
 
