@@ -34,7 +34,6 @@ async-scoped = { version = "0.9", features = ["use-tokio"] }
 futures = "0.3"
 dashmap = { version = "6.0", features = ["rayon"] }
 const_field_count = "0.1"
-smallvec = "1.13.2"
 
 [dev-dependencies]
 criterion = "0.5.1"

@@ -153,11 +153,27 @@ impl Constants {
         define_versioned_deps!(self, V0, V1, V2)
     }
 
+    #[inline]
     pub fn is_spore(self, cd: &CellDep) -> bool {
         self.spore_deps()
             .into_par_iter()
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
+    }
+
+    #[inline]
+    pub fn is_xudt(self, cd: &CellDep) -> bool {
+        self.xudt_type_dep().out_point.eq(&cd.out_point)
+    }
+
+    #[inline]
+    pub fn is_rgbpp(self, cd: &CellDep) -> bool {
+        self.rgbpp_lock_dep().out_point.eq(&cd.out_point)
+    }
+
+    #[inline]
+    pub fn is_inscription(self, cd: &CellDep) -> bool {
+        self.inscription_info_dep().out_point.eq(&cd.out_point)
     }
 
     pub const fn spore_types(self) -> [Option<Script>; 3] {
