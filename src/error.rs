@@ -17,8 +17,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("The previous output could not be found for the transaction '{tx_hash:?}' at index {index}. Please check your data.")]
     PreviousOutputNotFound { tx_hash: H256, index: u32 },
-    #[error("The data for the previous output of the transaction '{tx_hash:?}' at index {index} could not be found. Please verify your inputs.")]
-    PreviousOutputDataNotFound { tx_hash: H256, index: u32 },
+    // #[error("The data for the previous output of the transaction '{tx_hash:?}' at index {index} could not be found. Please verify your inputs.")]
+    // PreviousOutputDataNotFound { tx_hash: H256, index: u32 },
     #[error("An error occurred related to inscriptions: {0}")]
     Inscription(#[from] crate::inscription::InscriptionError),
 }

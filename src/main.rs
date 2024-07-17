@@ -333,8 +333,27 @@ async fn fetch_and_categorize_transactions(
                 block
                     .transactions
                     .into_par_iter()
-                    .fold(CategorizedTxs::new, |txs, tx| {
-                        categorize_transaction(txs, tx, constants, timestamp)
+                    .fold(CategorizedTxs::new, |mut txs, tx| {
+                        let categorizes = categorize_transaction(&tx, constants);
+                        if categorizes.is_spore {
+                            txs.spore_txs.push(SporeTx {
+                                tx: tx.clone(),
+                                timestamp,
+                            });
+                        }
+                        if categorizes.is_xudt {
+                            txs.xudt_txs.push(tx.clone());
+                        }
+
+                        if categorizes.is_rgbpp {
+                            txs.rgbpp_txs.push(tx.clone());
+                        }
+
+                        if categorizes.is_inscription {
+                            txs.inscription_txs.push(tx.clone());
+                        }
+
+                        txs
                     })
                     .reduce(CategorizedTxs::new, CategorizedTxs::merge),
             )
@@ -343,54 +362,29 @@ async fn fetch_and_categorize_transactions(
     Ok(categorize_txs)
 }
 
-fn categorize_transaction(
-    mut txs: CategorizedTxs,
-    tx: TransactionView,
-    constants: &constants::Constants,
-    timestamp: u64,
-) -> CategorizedTxs {
-    macro_rules! define_categories {
-        ($($item:ident),*) => {{
-            struct Categories {
-                $($item: bool),*
-            }
+macro_rules! define_categories {
+    ($($item:ident),*) => {
+        struct Categories {
+            $($item: bool),*
+        }
 
+        fn categorize_transaction(tx: &TransactionView, constants: &constants::Constants) -> Categories {
             tx.inner.cell_deps.iter().fold(
                 Categories {
                     $($item: false),*
                 },
                 |categories, cd| (
                     Categories {
-                        $($item: categories.$item || constants.is_spore(cd)),*
+                        $($item: categories.$item || constants.$item(cd)),*
                     }
                 )
             )
-        }};
-    }
-
-    let categories = define_categories!(is_spore, is_xudt, is_rgbpp, is_inscription);
-
-    if categories.is_spore {
-        txs.spore_txs.push(SporeTx {
-            tx: tx.clone(),
-            timestamp,
-        });
-    }
-
-    if categories.is_xudt {
-        txs.xudt_txs.push(tx.clone());
-    }
-
-    if categories.is_rgbpp {
-        txs.rgbpp_txs.push(tx.clone());
-    }
-
-    if categories.is_inscription {
-        txs.inscription_txs.push(tx);
-    }
-
-    txs
+        }
+    };
 }
+
+define_categories! { is_spore, is_xudt, is_rgbpp, is_inscription }
+
 async fn index_transactions(
     categorized_txs: CategorizedTxs,
     network: NetworkType,
