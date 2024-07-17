@@ -11,12 +11,9 @@ use figment::{
 };
 use futures::Future;
 use jsonrpsee::http_client::HttpClient;
-use rayon::iter::{
-    IntoParallelIterator, IntoParallelRefIterator, ParallelExtend, ParallelIterator,
-};
+use rayon::iter::{IntoParallelIterator, ParallelExtend, ParallelIterator};
 use sea_orm::{ConnectOptions, Database, DbConn, EntityTrait};
 
-use smallvec::SmallVec;
 use spore::SporeTx;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -74,17 +71,6 @@ impl CategorizedTxs {
             .par_extend(other.inscription_txs.into_par_iter());
         self
     }
-}
-
-// 使用 SmallVec 优化小数组的性能
-type CategoryVec = SmallVec<[TxCategory; 4]>;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TxCategory {
-    Spore,
-    Xudt,
-    Rgbpp,
-    Inscription,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -300,7 +286,6 @@ impl Indexer {
         async move {
             let categorized_txs =
                 fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
-            let categorized_txs = process_categorized_transactions(categorized_txs);
 
             index_transactions(categorized_txs, network, constants, op_sender, fetcher).await?;
 
@@ -335,75 +320,77 @@ async fn fetch_and_categorize_transactions(
     fetcher: &fetcher::Fetcher<HttpClient>,
     numbers: Vec<BlockNumber>,
     constants: &constants::Constants,
-) -> Result<Vec<(TransactionView, u64, CategoryVec)>> {
+) -> Result<CategorizedTxs> {
     let categorize_txs = fetcher
         .get_blocks(numbers)
         .await?
         .into_par_iter()
-        .flat_map(|block| {
-            block.transactions.into_par_iter().filter_map(move |tx| {
-                let categories = categorize_transaction(&tx, constants);
-                if !categories.is_empty() {
-                    Some((tx, block.header.inner.timestamp.value(), categories))
-                } else {
-                    None
-                }
-            })
+        .fold(CategorizedTxs::new, |txs, block| {
+            let timestamp = block.header.inner.timestamp.value();
+            txs.merge(
+                block
+                    .transactions
+                    .into_par_iter()
+                    .fold(CategorizedTxs::new, |txs, tx| {
+                        categorize_transaction(txs, tx, constants, timestamp)
+                    })
+                    .reduce(CategorizedTxs::new, CategorizedTxs::merge),
+            )
         })
-        .collect();
+        .reduce(CategorizedTxs::new, CategorizedTxs::merge);
     Ok(categorize_txs)
 }
 
-fn categorize_transaction(tx: &TransactionView, constants: &constants::Constants) -> CategoryVec {
-    tx.inner
-        .cell_deps
-        .par_iter()
-        .fold(SmallVec::new, |mut categories, cd| {
-            if constants.is_spore(cd) {
-                categories.push(TxCategory::Spore);
-            }
-            if constants.xudt_type_dep().out_point.eq(&cd.out_point) {
-                categories.push(TxCategory::Xudt);
-            }
-            if constants.rgbpp_lock_dep().out_point.eq(&cd.out_point) {
-                categories.push(TxCategory::Rgbpp);
-            }
-            if constants.inscription_info_dep().out_point.eq(&cd.out_point) {
-                categories.push(TxCategory::Inscription);
-            }
-            categories
-        })
-        .reduce(SmallVec::new, |mut a, mut b| {
-            a.append(&mut b);
-            a
-        })
-}
-
-fn process_categorized_transactions(
-    categorized_txs: Vec<(TransactionView, u64, CategoryVec)>,
+fn categorize_transaction(
+    mut txs: CategorizedTxs,
+    tx: TransactionView,
+    constants: &constants::Constants,
+    timestamp: u64,
 ) -> CategorizedTxs {
-    categorized_txs
-        .into_par_iter()
-        .fold(
-            CategorizedTxs::new,
-            |mut txs, (original_tx, timestamp, categories)| {
-                for category in categories {
-                    match category {
-                        TxCategory::Spore => txs.spore_txs.push(SporeTx {
-                            timestamp,
-                            tx: original_tx.clone(),
-                        }),
-                        TxCategory::Xudt => txs.xudt_txs.push(original_tx.clone()),
-                        TxCategory::Rgbpp => txs.rgbpp_txs.push(original_tx.clone()),
-                        TxCategory::Inscription => txs.inscription_txs.push(original_tx.clone()),
-                    }
-                }
-                txs
-            },
-        )
-        .reduce(CategorizedTxs::new, |pre, now| pre.merge(now))
-}
+    macro_rules! define_categories {
+        ($($item:ident),*) => {{
+            struct Categories {
+                $($item: bool),*
+            }
 
+            let categories: Categories = tx.inner.cell_deps.iter().fold(
+                Categories {
+                    $($item: false),*
+                },
+                |categories, cd| (
+                    Categories {
+                        $($item: categories.$item || constants.is_spore(cd)),*
+                    }
+                )
+            );
+
+            categories
+        }};
+    }
+
+    let categories = define_categories!(is_spore, is_xudt, is_rgbpp, is_inscription);
+
+    if categories.is_spore {
+        txs.spore_txs.push(SporeTx {
+            tx: tx.clone(),
+            timestamp,
+        });
+    }
+
+    if categories.is_xudt {
+        txs.xudt_txs.push(tx.clone());
+    }
+
+    if categories.is_rgbpp {
+        txs.rgbpp_txs.push(tx.clone());
+    }
+
+    if categories.is_inscription {
+        txs.inscription_txs.push(tx);
+    }
+
+    txs
+}
 async fn index_transactions(
     categorized_txs: CategorizedTxs,
     network: NetworkType,
