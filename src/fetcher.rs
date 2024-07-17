@@ -244,52 +244,52 @@ where
         Ok(res)
     }
 
-    pub async fn get_outputs_with_data(
-        &self,
-        inputs: Vec<CellInput>,
-    ) -> Result<Vec<(OutPoint, CellOutput, JsonBytes)>, Error> {
-        debug!("Getting outputs with data for inputs: {:?}", inputs);
-        let hashs = inputs
-            .par_iter()
-            .map(|input| input.previous_output.tx_hash.clone())
-            .collect::<HashSet<_>>()
-            .into_par_iter()
-            .collect::<Vec<_>>();
+    // pub async fn get_outputs_with_data(
+    //     &self,
+    //     inputs: Vec<CellInput>,
+    // ) -> Result<Vec<(OutPoint, CellOutput, JsonBytes)>, Error> {
+    //     debug!("Getting outputs with data for inputs: {:?}", inputs);
+    //     let hashs = inputs
+    //         .par_iter()
+    //         .map(|input| input.previous_output.tx_hash.clone())
+    //         .collect::<HashSet<_>>()
+    //         .into_par_iter()
+    //         .collect::<Vec<_>>();
 
-        debug!("Getting transactions by hashes: {:?}", hashs);
-        let txs = self.get_txs_by_hashes(hashs).await?;
+    //     debug!("Getting transactions by hashes: {:?}", hashs);
+    //     let txs = self.get_txs_by_hashes(hashs).await?;
 
-        let res = inputs
-            .into_par_iter()
-            .map(|input| {
-                let idx = input.previous_output.index.value();
-                let tx = txs.get(&input.previous_output.tx_hash);
-                let output = tx
-                    .and_then(|tx| tx.outputs.get(idx as usize).cloned())
-                    .ok_or_else(|| Error::PreviousOutputNotFound {
-                        tx_hash: input.previous_output.tx_hash.clone(),
-                        index: idx,
-                    });
-                let output_data = tx
-                    .and_then(|tx| tx.outputs_data.get(idx as usize).cloned())
-                    .ok_or_else(|| Error::PreviousOutputDataNotFound {
-                        tx_hash: input.previous_output.tx_hash.clone(),
-                        index: idx,
-                    });
-                let result = output.and_then(|output| {
-                    output_data.map(|data| (input.previous_output.clone(), output, data))
-                });
-                debug!(
-                    "Got output with data for input: {:?} -> {:?}",
-                    input, result
-                );
-                result
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+    //     let res = inputs
+    //         .into_par_iter()
+    //         .map(|input| {
+    //             let idx = input.previous_output.index.value();
+    //             let tx = txs.get(&input.previous_output.tx_hash);
+    //             let output = tx
+    //                 .and_then(|tx| tx.outputs.get(idx as usize).cloned())
+    //                 .ok_or_else(|| Error::PreviousOutputNotFound {
+    //                     tx_hash: input.previous_output.tx_hash.clone(),
+    //                     index: idx,
+    //                 });
+    //             let output_data = tx
+    //                 .and_then(|tx| tx.outputs_data.get(idx as usize).cloned())
+    //                 .ok_or_else(|| Error::PreviousOutputDataNotFound {
+    //                     tx_hash: input.previous_output.tx_hash.clone(),
+    //                     index: idx,
+    //                 });
+    //             let result = output.and_then(|output| {
+    //                 output_data.map(|data| (input.previous_output.clone(), output, data))
+    //             });
+    //             debug!(
+    //                 "Got output with data for input: {:?} -> {:?}",
+    //                 input, result
+    //             );
+    //             result
+    //         })
+    //         .collect::<Result<Vec<_>, _>>()?;
 
-        debug!("Got outputs with data: {:?}", res);
-        Ok(res)
-    }
+    //     debug!("Got outputs with data: {:?}", res);
+    //     Ok(res)
+    // }
 }
 
 #[tokio::test]
