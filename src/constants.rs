@@ -441,7 +441,7 @@ impl Constants {
         ScriptHashType::Data1,
         {
             (Testnet,V0) => "598d793defef36e2eeba54a9b45130e4ca92822e1d193671f490950c3b856080",
-            (Testnet,V1) => "fbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd",
+            (Testnet,V1) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075",
             (Testnet,V2) => "0bbe768b519d8ea7b96d58f1182eb7e6ef96c541fbd9526975077ee09f049058",
             (Mainnet,V1) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075"
         }
