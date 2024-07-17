@@ -465,3 +465,210 @@ pub const fn split_at_checked(bytes: &[u8], mid: usize) -> Option<(&[u8], &[u8])
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ckb_jsonrpc_types::TransactionView;
+    use tokio::sync::mpsc;
+    use tracing::debug;
+
+    use crate::{constants::Constants, xudt::index_xudt};
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn debug_index_xudt() {
+        let constants = Constants::Mainnet;
+        let tx: TransactionView = serde_json::from_str(TEST_JSON).expect("deserialize failed.");
+        let is_xudt = tx.inner.cell_deps.iter().any(|cd| constants.is_xudt(cd));
+        debug!("is xudt: {is_xudt}");
+
+        let (sender, mut recver) = mpsc::unbounded_channel();
+        index_xudt(tx, ckb_sdk::NetworkType::Mainnet, constants, sender).unwrap();
+        while let Some(op) = recver.blocking_recv() {
+            debug!("op: {op:?}");
+        }
+        debug!("done!");
+    }
+
+    const TEST_JSON: &'static str = r#"
+{
+  "cell_deps": [
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x71b299f349568a4e443f38a693ec6159fe535301c2c97884e6206199ef660e65"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0xc2a187e18ceb9fc30fdcec5a7f3c547e79a4ddde930bc646cfee278319c00943"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x5292c77c62f108e3a33e54ed3bdcc4457a9d7d88be0c6ef3c1811f473394e2f7"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x44b2bbddee6a13e688b61589cb8af16a1d25e58fa7e0b732cea3f1d32683beb3"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x7dfd96165a48fc0f346ad207491e8309f22c76f73f9b0940253471119706b5cb"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0xc3f90640cd458b62b0cf20f20d995c8e72e9931a04185d76aadb27eb89c2ad1a"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0xc07844ce21b38e4b071dd0e1ee3b0e27afd8d7532491327f39b786343f558ab7"
+      }
+    },
+    {
+      "dep_type": "code",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x3ceb520f240b168e0bddf0d89b4bcabbe7d4fa69751057cbe8e4f27239fad0e9"
+      }
+    },
+    {
+      "dep_type": "dep_group",
+      "out_point": {
+        "index": "0x0",
+        "tx_hash": "0x71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c"
+      }
+    }
+  ],
+  "hash": "0x6788d6206ac51938e7742ed14563c174a8c27785877b95e7c0dfb68f62265da9",
+  "header_deps": [],
+  "inputs": [
+    {
+      "previous_output": {
+        "index": "0x0",
+        "tx_hash": "0x89d3705c3459eae59c29b91955fe6de43b2cb6559cf33a87c2c0182d18e6375e"
+      },
+      "since": "0x0"
+    },
+    {
+      "previous_output": {
+        "index": "0x1",
+        "tx_hash": "0x0b7d48191dd0690b319e775b8fd3d32977172d5abc79f0baebbf8abdc1229d96"
+      },
+      "since": "0x0"
+    },
+    {
+      "previous_output": {
+        "index": "0x2",
+        "tx_hash": "0x0b7d48191dd0690b319e775b8fd3d32977172d5abc79f0baebbf8abdc1229d96"
+      },
+      "since": "0x0"
+    },
+    {
+      "previous_output": {
+        "index": "0x3",
+        "tx_hash": "0x0b7d48191dd0690b319e775b8fd3d32977172d5abc79f0baebbf8abdc1229d96"
+      },
+      "since": "0x0"
+    },
+    {
+      "previous_output": {
+        "index": "0x4",
+        "tx_hash": "0x0b7d48191dd0690b319e775b8fd3d32977172d5abc79f0baebbf8abdc1229d96"
+      },
+      "since": "0x0"
+    }
+  ],
+  "outputs": [
+    {
+      "capacity": "0x35a4e9000",
+      "lock": {
+        "args": "0x0001594407e8f6b24c5386f485b14bd1c2be398d2329",
+        "code_hash": "0xd00c84f0ec8fd441c38bc3f87a371f547190f2fcff88e642bc5bf54b9e318323",
+        "hash_type": "type"
+      },
+      "type": {
+        "args": "0x2ae639d6233f9b15545573b8e78f38ff7aa6c7bf8ef6460bf1f12d0a76c09c4e",
+        "code_hash": "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+        "hash_type": "data1"
+      }
+    },
+    {
+      "capacity": "0x5a8649300",
+      "lock": {
+        "args": "0x",
+        "code_hash": "0x7ef6e226ca9a3514ac76759f0b1550e70c9aa10aff89111fedf2c9d800d256f7",
+        "hash_type": "type"
+      },
+      "type": {
+        "args": "0xf53a0a80745cf27cace7d433d2529e952c062c6b73ab79675bc647208571141e",
+        "code_hash": "0xc70a8b00526419826023bcf196852eecdc87406cdff7366234f6387265413c98",
+        "hash_type": "type"
+      }
+    },
+    {
+      "capacity": "0x64dcf1a2db20d",
+      "lock": {
+        "args": "0x29273406698f36e9bdf46db404176859b0ba3a6bdf7025833f7fd3b49150609a",
+        "code_hash": "0x393df3359e33f85010cd65a3c4a4268f72d95ec6b049781a916c680b31ea9a88",
+        "hash_type": "type"
+      },
+      "type": null
+    },
+    {
+      "capacity": "0x395e95a00",
+      "lock": {
+        "args": "0x29273406698f36e9bdf46db404176859b0ba3a6bdf7025833f7fd3b49150609a",
+        "code_hash": "0x393df3359e33f85010cd65a3c4a4268f72d95ec6b049781a916c680b31ea9a88",
+        "hash_type": "type"
+      },
+      "type": {
+        "args": "0x2ae639d6233f9b15545573b8e78f38ff7aa6c7bf8ef6460bf1f12d0a76c09c4e",
+        "code_hash": "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+        "hash_type": "data1"
+      }
+    },
+    {
+      "capacity": "0x174821bc27",
+      "lock": {
+        "args": "0x42e11d5e294aa6901d30f0d4fb50fb30222b7f54",
+        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+        "hash_type": "type"
+      },
+      "type": null
+    }
+  ],
+  "outputs_data": [
+    "0x719df605000000000000000000000000",
+    "0x1e870200000000000000000000000000000000000000000000000000000000000000000000000000000d891067cd4d06000000000000000000178fb47b597a56d48b549226aff59f750b4784250c7f40f781b64ef090a8a0a7ba38484e3b1d0000000000000000000015d5d0d414d900000000000000000000b1e5a263060000000000000000000000",
+    "0x",
+    "0xba38484e3b1d00000000000000000000",
+    "0x29273406698f36e9bdf46db404176859b0ba3a6bdf7025833f7fd3b49150609a"
+  ],
+  "version": "0x0",
+  "witnesses": [
+    "0x",
+    "0x",
+    "0x",
+    "0x",
+    "0x5500000010000000550000005500000041000000730ac320f251aed48801d6b9c077325b845e1a56624f7e029f14047d836c2b221daf50b6d34a9fe08c2c53e4d2e19160a5d4886f7be452ab8af50fe490a13b5700"
+  ]
+}"#;
+}
