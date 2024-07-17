@@ -160,15 +160,17 @@ async fn initialize_blockchain_data(
     db: &DbConn,
     config: &Config,
 ) -> Result<(u64, NetworkType, constants::Constants)> {
-    let block_height_value = block_height::Entity::find().one(db).await?.unwrap().height as u64;
+    let mut initial_height = config.unistate.optional_config.initial_height;
+    let apply_init_height = config.unistate.optional_config.apply_initial_height;
+
+    if !apply_init_height {
+        if let Some(block_height_entity) = block_height::Entity::find().one(db).await? {
+            initial_height = initial_height.max(block_height_entity.height as u64);
+        }
+    }
+
     let network = config.unistate.optional_config.network;
     let constants = constants::Constants::from_config(network);
-
-    let initial_height = config
-        .unistate
-        .optional_config
-        .initial_height
-        .max(block_height_value);
 
     Ok((initial_height, network, constants))
 }
@@ -353,7 +355,7 @@ fn categorize_transaction(
                 $($item: bool),*
             }
 
-            let categories: Categories = tx.inner.cell_deps.iter().fold(
+            tx.inner.cell_deps.iter().fold(
                 Categories {
                     $($item: false),*
                 },
@@ -362,9 +364,7 @@ fn categorize_transaction(
                         $($item: categories.$item || constants.is_spore(cd)),*
                     }
                 )
-            );
-
-            categories
+            )
         }};
     }
 

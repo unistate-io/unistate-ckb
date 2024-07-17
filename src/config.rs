@@ -48,6 +48,7 @@ pub(crate) struct UnistateConfigOptional {
     pub(crate) interval: f32,
     pub(crate) level: Level,
     pub(crate) network: NetworkType,
+    pub(crate) apply_initial_height: bool,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Clone, Copy)]
@@ -80,6 +81,7 @@ impl Default for UnistateConfigOptional {
             interval: 1.0,
             level: Level::Info,
             network: NetworkType::Mainnet,
+            apply_initial_height: false,
         }
     }
 }

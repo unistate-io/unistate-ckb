@@ -64,27 +64,6 @@ impl SporeIndexer {
     }
 }
 
-#[cfg(test)]
-#[test]
-#[tracing_test::traced_test]
-fn debug_index_spore() {
-    let tx: TransactionView = serde_json::from_str(TEST_JSON).expect("deserialize failed.");
-    debug!("tx: {tx:?}");
-    let (sender, mut recver) = mpsc::unbounded_channel();
-    index_spore(
-        tx,
-        0,
-        ckb_sdk::NetworkType::Testnet,
-        sender,
-        Constants::Testnet,
-    )
-    .unwrap();
-    while let Some(op) = recver.blocking_recv() {
-        debug!("op: {op:?}");
-    }
-    debug!("done!");
-}
-
 enum DataVariant {
     Spore(spore_v1::SporeData),
     ClusterV2(spore_v2::ClusterDataV2),
@@ -529,82 +508,110 @@ fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::Spore
 }
 
 #[cfg(test)]
-const TEST_JSON: &'static str = r#"
-{
-  "cell_deps": [
-    {
-      "dep_type": "code",
-      "out_point": {
-        "index": "0x0",
-        "tx_hash": "0xfbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd"
-      }
-    },
-    {
-      "dep_type": "dep_group",
-      "out_point": {
-        "index": "0x0",
-        "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
-      }
+mod tests {
+    use ckb_jsonrpc_types::TransactionView;
+    use tokio::sync::mpsc;
+    use tracing::debug;
+
+    use crate::{constants::Constants, spore::index_spore};
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn debug_index_spore() {
+        let tx: TransactionView = serde_json::from_str(TEST_JSON).expect("deserialize failed.");
+        debug!("tx: {tx:?}");
+        let (sender, mut recver) = mpsc::unbounded_channel();
+        index_spore(
+            tx,
+            0,
+            ckb_sdk::NetworkType::Testnet,
+            sender,
+            Constants::Testnet,
+        )
+        .unwrap();
+        while let Some(op) = recver.blocking_recv() {
+            debug!("op: {op:?}");
+        }
+        debug!("done!");
     }
-  ],
-  "hash": "0x9b92dfee04c23944fa7d9e7b603d647113eb26f7a72c36c82336020fa7ffef54",
-  "header_deps": [],
-  "inputs": [
+
+    const TEST_JSON: &'static str = r#"
     {
-      "previous_output": {
-        "index": "0x0",
-        "tx_hash": "0xe11d4528ef96b9b77379085af0a0adc0cacfba86ee0cdf9d3a2789af414f433e"
-      },
-      "since": "0x0"
-    },
-    {
-      "previous_output": {
-        "index": "0x2",
-        "tx_hash": "0x10103972c03f93c5b1ccf9248e6c56f8d86328c7a5770e60f2572fe30b480e4f"
-      },
-      "since": "0x0"
-    },
-    {
-      "previous_output": {
-        "index": "0x0",
-        "tx_hash": "0x3522355b8304a240d3222647a28cf535094b0ab4b82c31dfbc5b2d3c7adc1a0f"
-      },
-      "since": "0x0"
-    }
-  ],
-  "outputs": [
-    {
-      "capacity": "0x41f009100",
-      "lock": {
-        "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
-        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-        "hash_type": "type"
-      },
-      "type": {
-        "args": "0xbb25fc0ac36dcaa47de2e4971d8a59d9f9f601b70bb35fee821ddc29d72e5ed3",
-        "code_hash": "0x7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075",
-        "hash_type": "data1"
-      }
-    },
-    {
-      "capacity": "0x46686f3ae",
-      "lock": {
-        "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
-        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-        "hash_type": "type"
-      },
-      "type": null
-    }
-  ],
-  "outputs_data": [
-    "0x320000001000000022000000320000000e000000546573746e65742053706f7265730c00000054657374696e67206f6e6c79",
-    "0x"
-  ],
-  "version": "0x0",
-  "witnesses": [
-    "0x5500000010000000550000005500000041000000bc293371bd6e82d61a3348a9e4f60ec20083b8ff8a1de67fa144dafd06ff10f1256ec7a83406b716854ff043789d70add0102d402b6d124ce4280035a810f6d801",
-    "0x",
-    "0x",
-    "0x010000ff150100000c00000010000000000000000501000008000000fd00000008000000f50000001000000030000000500000009d6307a36896705fec8c8965792a1a57a9f299f9927d27db444bb4a1cd43a85e1c90a05f434d40898da7f3cf88f77b0eeacdf16e5ac62a13d220c567a3482b83a1000000030000009d00000010000000300000007d000000bb25fc0ac36dcaa47de2e4971d8a59d9f9f601b70bb35fee821ddc29d72e5ed300000000490000001000000030000000310000009bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce801140000006cd8ae51f91bacd7910126f880138b30ac5d3015755814a280af21d1105e863be04387215227ad4f6aca47e6a9a3932b00d9bcd2"
-  ]
-}"#;
+        "cell_deps": [
+            {
+            "dep_type": "code",
+            "out_point": {
+                "index": "0x0",
+                "tx_hash": "0xfbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd"
+            }
+            },
+            {
+            "dep_type": "dep_group",
+            "out_point": {
+                "index": "0x0",
+                "tx_hash": "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37"
+            }
+            }
+        ],
+        "hash": "0x9b92dfee04c23944fa7d9e7b603d647113eb26f7a72c36c82336020fa7ffef54",
+        "header_deps": [],
+        "inputs": [
+            {
+            "previous_output": {
+                "index": "0x0",
+                "tx_hash": "0xe11d4528ef96b9b77379085af0a0adc0cacfba86ee0cdf9d3a2789af414f433e"
+            },
+            "since": "0x0"
+            },
+            {
+            "previous_output": {
+                "index": "0x2",
+                "tx_hash": "0x10103972c03f93c5b1ccf9248e6c56f8d86328c7a5770e60f2572fe30b480e4f"
+            },
+            "since": "0x0"
+            },
+            {
+            "previous_output": {
+                "index": "0x0",
+                "tx_hash": "0x3522355b8304a240d3222647a28cf535094b0ab4b82c31dfbc5b2d3c7adc1a0f"
+            },
+            "since": "0x0"
+            }
+        ],
+        "outputs": [
+            {
+            "capacity": "0x41f009100",
+            "lock": {
+                "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
+                "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                "hash_type": "type"
+            },
+            "type": {
+                "args": "0xbb25fc0ac36dcaa47de2e4971d8a59d9f9f601b70bb35fee821ddc29d72e5ed3",
+                "code_hash": "0x7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075",
+                "hash_type": "data1"
+            }
+            },
+            {
+            "capacity": "0x46686f3ae",
+            "lock": {
+                "args": "0x6cd8ae51f91bacd7910126f880138b30ac5d3015",
+                "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                "hash_type": "type"
+            },
+            "type": null
+            }
+        ],
+        "outputs_data": [
+            "0x320000001000000022000000320000000e000000546573746e65742053706f7265730c00000054657374696e67206f6e6c79",
+            "0x"
+        ],
+        "version": "0x0",
+        "witnesses": [
+            "0x5500000010000000550000005500000041000000bc293371bd6e82d61a3348a9e4f60ec20083b8ff8a1de67fa144dafd06ff10f1256ec7a83406b716854ff043789d70add0102d402b6d124ce4280035a810f6d801",
+            "0x",
+            "0x",
+            "0x010000ff150100000c00000010000000000000000501000008000000fd00000008000000f50000001000000030000000500000009d6307a36896705fec8c8965792a1a57a9f299f9927d27db444bb4a1cd43a85e1c90a05f434d40898da7f3cf88f77b0eeacdf16e5ac62a13d220c567a3482b83a1000000030000009d00000010000000300000007d000000bb25fc0ac36dcaa47de2e4971d8a59d9f9f601b70bb35fee821ddc29d72e5ed300000000490000001000000030000000310000009bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce801140000006cd8ae51f91bacd7910126f880138b30ac5d3015755814a280af21d1105e863be04387215227ad4f6aca47e6a9a3932b00d9bcd2"
+        ]
+    }"#;
+}
