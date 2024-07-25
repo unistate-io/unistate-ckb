@@ -20,10 +20,19 @@ pub struct Model {
     #[sea_orm(column_type = "Decimal(Some((39, 0)))", nullable)]
     pub mint_limit: Option<BigDecimal>,
     pub mint_status: Option<i16>,
+    pub inscription_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
+    #[sea_orm(
+        belongs_to = "super::addresses::Entity",
+        from = "Column::InscriptionId",
+        to = "super::addresses::Column::Id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    Addresses2,
     #[sea_orm(
         belongs_to = "super::addresses::Entity",
         from = "Column::TypeId",
@@ -31,13 +40,7 @@ pub enum Relation {
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    Addresses,
-}
-
-impl Related<super::addresses::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Addresses.def()
-    }
+    Addresses1,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

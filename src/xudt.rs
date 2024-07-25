@@ -201,6 +201,7 @@ fn upsert_token_info(
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
+        inscription_id: Set(None),
         udt_hash: Set(None),
         expected_supply: Set(None),
         mint_limit: Set(None),

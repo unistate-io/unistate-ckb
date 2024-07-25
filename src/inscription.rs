@@ -1,9 +1,9 @@
 use bigdecimal::{num_bigint::BigInt, BigDecimal};
-use ckb_jsonrpc_types::TransactionView;
+use ckb_jsonrpc_types::{Script, TransactionView};
 use ckb_sdk::NetworkType;
 use ckb_types::prelude::Entity as _;
 use ckb_types::{packed, H256};
-use molecule::prelude::Entity as _;
+use molecule::prelude::{Builder as _, Entity as _, Reader as _};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator as _};
 use sea_orm::Set;
 use std::convert::TryInto;
@@ -64,7 +64,7 @@ struct InscriptionInfo {
 
 fn index_inscription_info(
     tx: TransactionView,
-    network: ckb_sdk::NetworkType,
+    network: NetworkType,
     constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
@@ -79,7 +79,6 @@ fn index_inscription_info(
                 if tp.code_hash.eq(&inscription_info.code_hash)
                     && tp.hash_type.eq(&inscription_info.hash_type)
                 {
-                    let inscription_id = tp.args.as_bytes().to_vec();
                     let info = deserialize_inscription_info(data.as_bytes())?;
                     let type_id = upsert_address(
                         &action::AddressUnion::Script(action::Script::new_unchecked(
@@ -88,13 +87,16 @@ fn index_inscription_info(
                         network,
                         op_sender.clone(),
                     )?;
-                    upsert_inscription_info(
-                        info,
-                        tx.hash.clone(),
-                        idx,
+                    upsert_inscription_info(UpsertInscriptionInfoParams {
+                        inscription_info: info,
+                        inscription_info_script: inscription_info,
+                        network,
+                        constants,
+                        tx_hash: tx.hash.clone(),
+                        index: idx,
                         type_id,
-                        op_sender.clone(),
-                    )?;
+                        op_sender: op_sender.clone(),
+                    })?;
                 }
             }
             Ok(())
@@ -103,13 +105,30 @@ fn index_inscription_info(
     Ok(())
 }
 
-fn upsert_inscription_info(
+#[derive(Debug)]
+struct UpsertInscriptionInfoParams {
     inscription_info: InscriptionInfo,
+    inscription_info_script: Script,
+    network: NetworkType,
+    constants: Constants,
     tx_hash: H256,
     index: usize,
     type_id: String,
     op_sender: mpsc::UnboundedSender<Operations>,
-) -> anyhow::Result<()> {
+}
+
+fn upsert_inscription_info(params: UpsertInscriptionInfoParams) -> anyhow::Result<()> {
+    let UpsertInscriptionInfoParams {
+        inscription_info,
+        inscription_info_script,
+        network,
+        constants,
+        tx_hash,
+        index,
+        type_id,
+        op_sender,
+    } = params;
+
     let InscriptionInfo {
         decimal,
         name,
@@ -120,8 +139,15 @@ fn upsert_inscription_info(
         mint_status,
     } = inscription_info;
 
+    let xudt_type_script = action::AddressUnion::Script(action::Script::new_unchecked(
+        calc_xudt_type_script(inscription_info_script, constants).as_bytes(),
+    ));
+
+    let inscription_id = upsert_address(&xudt_type_script, network, op_sender.clone())?;
+
     let token_info = token_info::ActiveModel {
         type_id: Set(type_id),
+        inscription_id: Set(Some(inscription_id)),
         transaction_hash: Set(tx_hash.0.to_vec()),
         transaction_index: Set(index as i32),
         decimal: Set(decimal as i16),
@@ -144,14 +170,10 @@ fn upsert_inscription_info(
 pub enum InscriptionError {
     #[error("Invalid UTF-8 in name")]
     InvalidUtf8InName,
-    #[error("Invalid UTF-8 in symbol")]
-    InvalidUtf8InSymbol,
     #[error("Invalid xudt_hash length")]
     InvalidXudtHashLength,
     #[error("Invalid max_supply")]
     InvalidMaxSupply,
-    #[error("Invalid mint_limit")]
-    InvalidMintLimit,
 }
 
 fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, InscriptionError> {
@@ -160,38 +182,21 @@ fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, Inscript
     let decimal = data[cursor];
     cursor += 1;
 
-    let name_len = data[cursor] as usize;
-    cursor += 1;
-    let name = std::str::from_utf8(&data[cursor..cursor + name_len])
-        .map_err(|_| InscriptionError::InvalidUtf8InName)?
-        .to_string();
-    cursor += name_len;
+    let (name, new_cursor) = read_string(&data[cursor..])?;
+    cursor += new_cursor;
 
-    let symbol_len = data[cursor] as usize;
-    cursor += 1;
-    let symbol = std::str::from_utf8(&data[cursor..cursor + symbol_len])
-        .map_err(|_| InscriptionError::InvalidUtf8InSymbol)?
-        .to_string();
-    cursor += symbol_len;
+    let (symbol, new_cursor) = read_string(&data[cursor..])?;
+    cursor += new_cursor;
 
     let xudt_hash: [u8; 32] = data[cursor..cursor + 32]
         .try_into()
         .map_err(|_| InscriptionError::InvalidXudtHashLength)?;
     cursor += 32;
 
-    let max_supply = u128::from_le_bytes(
-        data[cursor..cursor + 16]
-            .try_into()
-            .map_err(|_| InscriptionError::InvalidMaxSupply)?,
-    ) / 10u128.pow(decimal as u32);
+    let max_supply = read_u128(&data[cursor..], decimal)?;
     cursor += 16;
 
-    let mint_limit = u128::from_le_bytes(
-        data[cursor..cursor + 16]
-            .try_into()
-            .map_err(|_| InscriptionError::InvalidMintLimit)?,
-    ) / 10u128.pow(decimal as u32);
-
+    let mint_limit = read_u128(&data[cursor..], decimal)?;
     cursor += 16;
 
     let mint_status = data[cursor];
@@ -205,6 +210,66 @@ fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, Inscript
         mint_limit,
         mint_status,
     })
+}
+
+fn read_string(data: &[u8]) -> Result<(String, usize), InscriptionError> {
+    let len = data[0] as usize;
+    let string = std::str::from_utf8(&data[1..1 + len])
+        .map_err(|_| InscriptionError::InvalidUtf8InName)?
+        .to_string();
+    Ok((string, len + 1))
+}
+
+fn read_u128(data: &[u8], decimal: u8) -> Result<u128, InscriptionError> {
+    let value = u128::from_le_bytes(
+        data[..16]
+            .try_into()
+            .map_err(|_| InscriptionError::InvalidMaxSupply)?,
+    ) / 10u128.pow(decimal as u32);
+    Ok(value)
+}
+
+impl From<Script> for action::Script {
+    fn from(json: Script) -> Self {
+        let Script {
+            args,
+            code_hash,
+            hash_type,
+        } = json;
+        let hash_type: ckb_types::core::ScriptHashType = hash_type.into();
+        action::Script::new_builder()
+            .args(action::Bytes::new_unchecked(args.into_bytes()))
+            .code_hash(
+                action::Byte32::from_slice(code_hash.as_bytes())
+                    .expect("impossible: fail to pack H256"),
+            )
+            .hash_type(Into::<u8>::into(hash_type).into())
+            .build()
+    }
+}
+
+fn calc_xudt_type_script(inscription_info_script: Script, constants: Constants) -> action::Script {
+    let owner_script = generate_owner_script(inscription_info_script, constants);
+    let args = action::Bytes::from_slice(&blake2b_256(owner_script.as_reader().as_slice()))
+        .expect("impossible: fail to pack Bytes");
+    action::Script::from(constants.xudt_type_script())
+        .as_builder()
+        .args(args)
+        .build()
+}
+
+fn generate_owner_script(inscription_info_script: Script, constants: Constants) -> action::Script {
+    let packed_script = action::Script::from(inscription_info_script);
+    let args = action::Bytes::from_slice(&blake2b_256(packed_script.as_reader().as_slice()))
+        .expect("impossible: fail to pack Bytes");
+    action::Script::from(constants.inscription_type_script())
+        .as_builder()
+        .args(args)
+        .build()
+}
+
+fn blake2b_256(data: &[u8]) -> [u8; 32] {
+    ckb_hash::blake2b_256(data)
 }
 
 #[cfg(test)]
