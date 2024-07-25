@@ -115,7 +115,7 @@ fn parse_args() -> Result<Option<bool>> {
 }
 
 fn print_help() {
-    println!("Usage: program_name [OPTIONS]");
+    println!("Usage: unistate-ckb [OPTIONS]");
     println!("Options:");
     println!("  -h, --help                 Print this help message");
     println!("  -a, --apply-init-height    Apply initial height (true/false)");
