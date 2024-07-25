@@ -248,23 +248,31 @@ impl From<Script> for action::Script {
     }
 }
 
+fn as_action_bytes(bytes: molecule::bytes::Bytes) -> action::Bytes {
+    let len = (bytes.len() as u32).to_le_bytes();
+    let mut v = Vec::with_capacity(4 + bytes.len());
+    v.extend_from_slice(&len[..]);
+    v.extend_from_slice(&bytes[..]);
+    action::Bytes::new_unchecked(v.into())
+}
+
 fn calc_xudt_type_script(inscription_info_script: Script, constants: Constants) -> action::Script {
     let owner_script = generate_owner_script(inscription_info_script, constants);
-    let args = action::Bytes::from_slice(&blake2b_256(owner_script.as_reader().as_slice()))
-        .expect("impossible: fail to pack Bytes");
+    let args = action::Byte32::from_slice(&blake2b_256(owner_script.as_reader().as_slice()))
+        .expect("impossible: fail to pack Byte32");
     action::Script::from(constants.xudt_type_script())
         .as_builder()
-        .args(args)
+        .args(as_action_bytes(args.raw_data()))
         .build()
 }
 
 fn generate_owner_script(inscription_info_script: Script, constants: Constants) -> action::Script {
     let packed_script = action::Script::from(inscription_info_script);
-    let args = action::Bytes::from_slice(&blake2b_256(packed_script.as_reader().as_slice()))
-        .expect("impossible: fail to pack Bytes");
+    let args = action::Byte32::from_slice(&blake2b_256(packed_script.as_reader().as_slice()))
+        .expect("impossible: fail to pack Byte32");
     action::Script::from(constants.inscription_type_script())
         .as_builder()
-        .args(args)
+        .args(as_action_bytes(args.raw_data()))
         .build()
 }
 
