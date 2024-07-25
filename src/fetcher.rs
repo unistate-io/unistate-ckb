@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ckb_jsonrpc_types::{
-    BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, OutPoint, Transaction,
-    TransactionWithStatusResponse,
+    BlockNumber, BlockView, CellInput, CellOutput, Transaction, TransactionWithStatusResponse,
 };
 use ckb_sdk::rpc::ResponseFormatGetter;
 use ckb_types::H256;

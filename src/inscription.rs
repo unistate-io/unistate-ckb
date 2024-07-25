@@ -79,6 +79,7 @@ fn index_inscription_info(
                 if tp.code_hash.eq(&inscription_info.code_hash)
                     && tp.hash_type.eq(&inscription_info.hash_type)
                 {
+                    let inscription_id = tp.args.as_bytes().to_vec();
                     let info = deserialize_inscription_info(data.as_bytes())?;
                     let type_id = upsert_address(
                         &action::AddressUnion::Script(action::Script::new_unchecked(
