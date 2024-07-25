@@ -1,4 +1,5 @@
 use core::time::Duration;
+use pico_args::Arguments;
 
 use ckb_jsonrpc_types::{BlockNumber, TransactionView};
 
@@ -75,6 +76,8 @@ impl CategorizedTxs {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
+    let apply_init_height = parse_args()?;
+
     setup_environment()?;
     let config = load_config()?;
     setup_logging(&config)?;
@@ -84,12 +87,38 @@ async fn main() -> Result<()> {
     let db = setup_database(&config).await?;
     let client = setup_fetcher(&config)?;
 
-    let (initial_height, network, constants) = initialize_blockchain_data(&db, &config).await?;
+    let (initial_height, network, constants) =
+        initialize_blockchain_data(&db, &config, apply_init_height).await?;
 
     let mut indexer = Indexer::new(initial_height, &config, client, network, constants, db);
     indexer.run().await?;
 
     Ok(())
+}
+
+fn parse_args() -> Result<Option<bool>> {
+    let mut args = Arguments::from_env();
+
+    if args.contains(["-h", "--help"]) {
+        print_help();
+        std::process::exit(0);
+    }
+
+    let apply_init_height = args.opt_value_from_str(["-a", "--apply-init-height"])?;
+
+    let remaining = args.finish();
+    if !remaining.is_empty() {
+        eprintln!("Warning: Unused arguments: {:?}", remaining);
+    }
+
+    Ok(apply_init_height)
+}
+
+fn print_help() {
+    println!("Usage: program_name [OPTIONS]");
+    println!("Options:");
+    println!("  -h, --help                 Print this help message");
+    println!("  -a, --apply-init-height    Apply initial height (true/false)");
 }
 
 fn setup_environment() -> Result<()> {
@@ -159,9 +188,11 @@ fn setup_fetcher(config: &Config) -> Result<fetcher::Fetcher<HttpClient>> {
 async fn initialize_blockchain_data(
     db: &DbConn,
     config: &Config,
+    apply_init_height: Option<bool>,
 ) -> Result<(u64, NetworkType, constants::Constants)> {
     let mut initial_height = config.unistate.optional_config.initial_height;
-    let apply_init_height = config.unistate.optional_config.apply_initial_height;
+    let apply_init_height =
+        apply_init_height.unwrap_or(config.unistate.optional_config.apply_initial_height);
 
     if !apply_init_height {
         if let Some(block_height_entity) = block_height::Entity::find().one(db).await? {
