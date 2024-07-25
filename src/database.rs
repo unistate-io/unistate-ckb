@@ -103,7 +103,10 @@ define_upsert_functions! {
     upsert_many_info => (
         token_info,
         define_conflict!(
-            token_info::Column::TypeId
+            token_info::Column::TypeId => [
+                // 为了增加inscription id
+                token_info::Column::InscriptionId
+            ]
         )
     ),
 
