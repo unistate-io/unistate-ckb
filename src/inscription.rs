@@ -1,9 +1,9 @@
 use bigdecimal::{num_bigint::BigInt, BigDecimal};
 use ckb_jsonrpc_types::{Script, TransactionView};
 use ckb_sdk::NetworkType;
-use ckb_types::prelude::Entity as _;
+use ckb_types::prelude::{Builder as _, Entity as _};
 use ckb_types::{packed, H256};
-use molecule::prelude::{Builder as _, Entity as _, Reader as _};
+use molecule::prelude::Entity as _;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator as _};
 use sea_orm::Set;
 use std::convert::TryInto;
@@ -229,64 +229,118 @@ fn read_u128(data: &[u8], decimal: u8) -> Result<u128, InscriptionError> {
     Ok(value)
 }
 
-impl From<Script> for action::Script {
-    fn from(json: Script) -> Self {
-        let Script {
-            args,
-            code_hash,
-            hash_type,
-        } = json;
-        let hash_type: ckb_types::core::ScriptHashType = hash_type.into();
-        action::Script::new_builder()
-            .args(action::Bytes::new_unchecked(args.into_bytes()))
-            .code_hash(
-                action::Byte32::from_slice(code_hash.as_bytes())
-                    .expect("impossible: fail to pack H256"),
-            )
-            .hash_type(Into::<u8>::into(hash_type).into())
-            .build()
-    }
-}
+fn calc_xudt_type_script(
+    inscription_info_script: impl Into<packed::Script>,
+    constants: Constants,
+) -> packed::Script {
+    let inscription_info_script = inscription_info_script.into();
+    let owner_script = generate_owner_script(&inscription_info_script, constants);
 
-fn as_action_bytes(bytes: molecule::bytes::Bytes) -> action::Bytes {
-    let len = (bytes.len() as u32).to_le_bytes();
-    let mut v = Vec::with_capacity(4 + bytes.len());
-    v.extend_from_slice(&len[..]);
-    v.extend_from_slice(&bytes[..]);
-    action::Bytes::new_unchecked(v.into())
-}
-
-fn calc_xudt_type_script(inscription_info_script: Script, constants: Constants) -> action::Script {
-    let owner_script = generate_owner_script(inscription_info_script, constants);
-    action::Script::from(constants.xudt_type_script())
+    packed::Script::from(constants.xudt_type_script())
         .as_builder()
-        .args(script_to_hash(owner_script))
+        .args(generate_args(&owner_script))
         .build()
 }
 
-fn generate_owner_script(inscription_info_script: Script, constants: Constants) -> action::Script {
-    action::Script::from(constants.inscription_info_type_script())
+fn generate_owner_script(
+    inscription_info_script: &packed::Script,
+    constants: Constants,
+) -> packed::Script {
+    packed::Script::from(constants.inscription_type_script())
         .as_builder()
-        .args(script_to_hash(inscription_info_script))
+        .args(generate_args(inscription_info_script))
         .build()
 }
 
-fn blake2b_256(data: &[u8]) -> [u8; 32] {
-    ckb_hash::blake2b_256(data)
-}
-
-fn script_to_hash(script: impl Into<action::Script>) -> action::Bytes {
-    let args = action::Byte32::from_slice(&blake2b_256(script.into().as_reader().as_slice()))
-        .expect("impossible: fail to pack Byte32");
-
-    as_action_bytes(args.raw_data())
+fn generate_args(script: &packed::Script) -> packed::Bytes {
+    packed::Bytes::new_builder()
+        .set(
+            script
+                .calc_script_hash()
+                .raw_data()
+                .into_iter()
+                .map(|s| packed::Byte::new(s))
+                .collect(),
+        )
+        .build()
 }
 
 #[cfg(test)]
 mod tests {
     use hex::encode;
+    use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn test_calc_xudt_type_script() {
+        use serde_json::json;
+
+        let constants = Constants::Testnet;
+        let info_script: Script = serde_json::from_value(json!({
+            "code_hash": "0x50fdea2d0030a8d0b3d69f883b471cab2a29cae6f01923f19cecac0f27fdaaa6",
+            "args": "0x720597d6fde35c93b3a30249d5ad5396eab8dbb70acaffbf2f85c0f9ce9b4180",
+            "hash_type": "type"
+        }))
+        .unwrap();
+
+        println!(
+            "info: {:#}",
+            serde_json::to_string_pretty(&info_script).unwrap()
+        );
+
+        let info_script: packed::Script = info_script.into();
+
+        let raw_owner_script = generate_owner_script(&info_script, constants);
+        println!("raw owner: {:#}", raw_owner_script);
+        println!(
+            "raw owner args: {}",
+            hex::encode(raw_owner_script.args().raw_data())
+        );
+        let owner_script: Script = raw_owner_script.into();
+
+        println!(
+            "owner_script: {:#}",
+            serde_json::to_string_pretty(&owner_script).unwrap()
+        );
+
+        println!("owner args: {}", hex::encode(owner_script.args.as_bytes()));
+
+        let xudt_script = calc_xudt_type_script(info_script.clone(), constants);
+        println!(
+            "xudt hash: {}",
+            hex::encode(xudt_script.calc_script_hash().as_bytes())
+        );
+
+        let xudt_script: Script = xudt_script.into();
+
+        let expected_xudt_script: Script = serde_json::from_value(json!(
+            {
+                "code_hash": "0x25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
+                "args": "0x0f8a7460a72566976aedaf1cb946fd28a477ea7baec7529892538e4733874240",
+                "hash_type": "type"
+            }
+        ))
+        .unwrap();
+
+        let expected_xudt_hash: packed::Script = expected_xudt_script.clone().into();
+
+        println!(
+            "expected xudt hash: {}",
+            hex::encode(expected_xudt_hash.calc_script_hash().as_bytes())
+        );
+
+        println!(
+            "our xudt: {:#}",
+            serde_json::to_string_pretty(&xudt_script).unwrap()
+        );
+        println!(
+            "expected xudt: {:#}",
+            serde_json::to_string_pretty(&expected_xudt_script).unwrap()
+        );
+
+        assert_eq!(expected_xudt_script, xudt_script);
+    }
 
     fn serialize_inscription_info(info: &InscriptionInfo) -> String {
         fn u8_to_hex(value: u8) -> String {
