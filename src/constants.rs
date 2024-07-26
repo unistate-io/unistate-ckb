@@ -108,6 +108,18 @@ macro_rules! define_script {
         });
     };
 
+    (@diff $name:ident, { $($network:ident => $script_hash_type:expr => $hash:expr),+ $(,)? }) => {
+        define_network_item!(Script, $name, {
+            $($network => define_script!(@internal $script_hash_type, $hash, const_default_bytes()),)*
+        });
+    };
+
+    (@diffmore $name:ident,  { $(($network:ident, $version:ident) => $script_hash_type:expr => $hash:expr),+ $(,)? }) => {
+        define_network_item!(Script, $name, {
+            $(($network, $version) => define_script!(@internal $script_hash_type, $hash, const_default_bytes()),)*
+        });
+    };
+
     (@internal $script_hash_type:expr, $script_code_hash:expr, $script_args:expr) => {
         Script {
             code_hash: H256(hex!($script_code_hash)),
@@ -415,11 +427,11 @@ impl Constants {
     );
 
     define_script!(
+        @diff
         xudt_type_script,
-        ScriptHashType::Data1,
         {
-            Testnet => "25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
-            Mainnet => "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95"
+            Testnet =>  ScriptHashType::Type => "25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
+            Mainnet =>  ScriptHashType::Data1 => "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95"
         }
     );
 

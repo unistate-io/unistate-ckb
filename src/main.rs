@@ -19,8 +19,9 @@ use spore::SporeTx;
 use tokio::{
     sync::{mpsc, oneshot},
     task::{self, JoinHandle, JoinSet},
+    time,
 };
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
 };
@@ -91,9 +92,43 @@ async fn main() -> Result<()> {
         initialize_blockchain_data(&db, &config, apply_init_height).await?;
 
     let mut indexer = Indexer::new(initial_height, &config, client, network, constants, db);
-    indexer.run().await?;
+
+    run_with_watchdog(&mut indexer).await?;
 
     Ok(())
+}
+
+async fn run_with_watchdog(indexer: &mut Indexer) -> Result<()> {
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut last_failure_time: Option<time::Instant> = None;
+
+    loop {
+        match indexer.run().await {
+            Ok(_) => {
+                info!("Indexer run completed successfully.");
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Indexer run encountered an error: {:?}", e);
+
+                if let Some(last_error) = last_error.as_ref() {
+                    if last_error.to_string() == e.to_string() {
+                        if let Some(last_failure_time) = last_failure_time {
+                            if last_failure_time.elapsed() < Duration::from_secs(10) {
+                                error!("Repeated error within 10 seconds: {:?}", e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+
+                last_error = Some(e);
+                last_failure_time = Some(time::Instant::now());
+                info!("Restarting indexer after error...");
+                time::sleep(Duration::from_secs(6)).await;
+            }
+        }
+    }
 }
 
 fn parse_args() -> Result<Option<bool>> {
@@ -269,11 +304,11 @@ impl Indexer {
             self.manage_handles(&mut handles).await?;
 
             if self.batch_size == 0 {
-                tokio::time::sleep(Duration::from_secs(6)).await;
+                time::sleep(Duration::from_secs(6)).await;
                 self.update_target_height().await?;
             }
 
-            tokio::time::sleep(Duration::from_secs_f32(self.interval)).await;
+            time::sleep(Duration::from_secs_f32(self.interval)).await;
         }
     }
 
