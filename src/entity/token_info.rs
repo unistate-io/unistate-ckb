@@ -20,7 +20,6 @@ pub struct Model {
     #[sea_orm(column_type = "Decimal(Some((39, 0)))", nullable)]
     pub mint_limit: Option<BigDecimal>,
     pub mint_status: Option<i16>,
-    #[sea_orm(unique)]
     pub inscription_id: Option<String>,
 }
 
