@@ -222,7 +222,7 @@ fn parse_xudt(
     debug!("Parsing CellOutput: {:?}", o);
     debug!("Parsing JsonBytes: {:?}", od);
 
-    let (mut raw_amount, raw_xudt_data) = split_at_checked(od.as_bytes(), 16)?;
+    let (mut raw_amount, raw_xudt_data) = od.as_bytes().split_at_checked(16)?;
 
     debug!("Raw amount: {:?}", raw_amount);
     debug!("Raw XudtData: {:?}", raw_xudt_data);
@@ -236,7 +236,7 @@ fn parse_xudt(
     let (raw_onwer_lock_script_hash, raw_xudt_args) = o
         .type_
         .as_ref()
-        .and_then(|tp| split_at_checked(tp.args.as_bytes(), 32))
+        .and_then(|tp| tp.args.as_bytes().split_at_checked(32))
         .unzip();
     debug!(
         "Raw owner lock script hash: {:?}",
@@ -249,7 +249,7 @@ fn parse_xudt(
     debug!("Owner lock script hash: {:?}", owner_lock_script_hash);
 
     let xudt_args = raw_xudt_args.filter(|raw| !raw.is_empty()).and_then(|raw| {
-        let (mut flags, ext_data) = split_at_checked(raw, 4)?;
+        let (mut flags, ext_data) = raw.split_at_checked(4)?;
         debug!("Flags: {:?}", flags);
         debug!("Extension data: {:?}", ext_data);
 
@@ -453,18 +453,6 @@ fn index_xudt(
     )?;
 
     Ok(())
-}
-
-#[inline]
-#[must_use]
-pub const fn split_at_checked(bytes: &[u8], mid: usize) -> Option<(&[u8], &[u8])> {
-    if mid <= bytes.len() {
-        // SAFETY: `[ptr; mid]` and `[mid; len]` are inside `self`, which
-        // fulfills the requirements of `split_at_unchecked`.
-        Some(unsafe { bytes.split_at_unchecked(mid) })
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
