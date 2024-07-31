@@ -15,23 +15,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::clusters::Entity")]
-    Clusters,
-    #[sea_orm(has_many = "super::spores::Entity")]
-    Spores,
-}
-
-impl Related<super::clusters::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Clusters.def()
-    }
-}
-
-impl Related<super::spores::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Spores.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

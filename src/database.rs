@@ -130,6 +130,7 @@ define_upsert_functions! {
                 clusters::Column::ClusterName,
                 clusters::Column::ClusterDescription,
                 clusters::Column::MutantId,
+                clusters::Column::TypeId,
                 clusters::Column::IsBurned,
                 clusters::Column::UpdatedAt
             ]
@@ -146,6 +147,7 @@ define_upsert_functions! {
                 spores::Column::Content,
                 spores::Column::ClusterId,
                 spores::Column::IsBurned,
+                spores::Column::TypeId,
                 spores::Column::UpdatedAt
             ]
         ),

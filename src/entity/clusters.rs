@@ -20,6 +20,7 @@ pub struct Model {
     pub is_burned: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+    pub type_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -31,17 +32,19 @@ pub enum Relation {
         on_update = "NoAction",
         on_delete = "NoAction"
     )]
-    Addresses,
+    Addresses2,
+    #[sea_orm(
+        belongs_to = "super::addresses::Entity",
+        from = "Column::TypeId",
+        to = "super::addresses::Column::Id",
+        on_update = "NoAction",
+        on_delete = "NoAction"
+    )]
+    Addresses1,
     #[sea_orm(has_many = "super::spore_actions::Entity")]
     SporeActions,
     #[sea_orm(has_many = "super::spores::Entity")]
     Spores,
-}
-
-impl Related<super::addresses::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Addresses.def()
-    }
 }
 
 impl Related<super::spore_actions::Entity> for Entity {
