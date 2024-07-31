@@ -416,7 +416,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
-                type_id: Set(Some(type_id)),
+                type_id: Set(type_id),
             };
             op_sender.send(Operations::UpsertSpores(model))?;
         }
@@ -430,7 +430,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
-                type_id: Set(Some(type_id)),
+                type_id: Set(type_id),
             };
 
             op_sender.send(Operations::UpsertCluster(model))?;
@@ -445,7 +445,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
-                type_id: Set(Some(type_id)),
+                type_id: Set(type_id),
             };
 
             op_sender.send(Operations::UpsertCluster(model))?;
