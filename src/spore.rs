@@ -72,6 +72,7 @@ enum DataVariant {
 
 struct Data {
     id: Vec<u8>,
+    type_id: action::AddressUnion,
     to: action::AddressUnion,
     variant: DataVariant,
 }
@@ -94,8 +95,9 @@ fn index_spore(
                 .type_
                 .as_ref()
                 .and_then(|s| s.args.as_bytes().get(..32).map(|v| v.to_vec()))
-                .zip(output_cell.type_.as_ref().map(|s| &s.code_hash))
-                .and_then(|(id, code_hash)| {
+                .zip(output_cell.type_.as_ref())
+                .and_then(|(id, type_script)| {
+                    let code_hash = &type_script.code_hash;
                     if constants.is_spore_type(code_hash) {
                         debug!("is spore!");
                         spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes())
@@ -120,6 +122,7 @@ fn index_spore(
                     .map(|variant| Data {
                         variant,
                         to: action::AddressUnion::from_json_script(output_cell.lock.clone()),
+                        type_id: action::AddressUnion::from_json_script(type_script.clone()),
                         id,
                     })
                 })
@@ -393,7 +396,13 @@ fn upsert_spores(
 
     let now = to_timestamp(timestamp);
 
-    let Data { id, to, variant } = data;
+    let Data {
+        id,
+        type_id,
+        to,
+        variant,
+    } = data;
+    let type_id = upsert_address(&type_id, network, op_sender.clone())?;
     let to = upsert_address(&to, network, op_sender.clone())?;
 
     match variant {
@@ -407,6 +416,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
+                type_id: Set(Some(type_id)),
             };
             op_sender.send(Operations::UpsertSpores(model))?;
         }
@@ -420,6 +430,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
+                type_id: Set(Some(type_id)),
             };
 
             op_sender.send(Operations::UpsertCluster(model))?;
@@ -434,6 +445,7 @@ fn upsert_spores(
                 is_burned: Set(false),
                 created_at: Set(now),
                 updated_at: Set(now),
+                type_id: Set(Some(type_id)),
             };
 
             op_sender.send(Operations::UpsertCluster(model))?;
