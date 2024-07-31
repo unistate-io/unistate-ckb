@@ -20,7 +20,7 @@ pub struct Model {
     pub is_burned: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
-    pub type_id: Option<String>,
+    pub type_id: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
