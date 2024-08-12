@@ -386,7 +386,7 @@ fn index_xudt(
             if p.0
                 .type_
                 .as_ref()
-                .map(|t| constants.xudt_type_script().code_hash.eq(&t.code_hash))
+                .map(|t| constants.is_xudt_type(&t.code_hash))
                 .unwrap_or(false)
             {
                 debug!("Output is XUDT type");

@@ -188,6 +188,23 @@ impl Constants {
         self.inscription_info_dep().out_point.eq(&cd.out_point)
     }
 
+    const fn xudt_types(self) -> [Option<Script>; 3] {
+        macro_rules! define_versioned_xudt_types {
+            ($self:ident, $($version:ident),*) => {
+                [
+                    $(
+                        $self.xudt_type_script(Version::$version),
+                    )*
+                ]
+            };
+        }
+        define_versioned_xudt_types!(self, V0, V1, V2)
+    }
+
+    pub fn inscription_xudt_type_script(self) -> Script {
+        self.xudt_type_script(Version::V0).unwrap()
+    }
+
     pub const fn spore_types(self) -> [Option<Script>; 3] {
         macro_rules! define_versioned_spore_types {
             ($self:ident, $($version:ident),*) => {
@@ -212,6 +229,13 @@ impl Constants {
             };
         }
         define_versioned_spore_types!(self, V0, V1, V2)
+    }
+
+    pub fn is_xudt_type(self, hash: &H256) -> bool {
+        self.xudt_types()
+            .into_par_iter()
+            .flatten()
+            .any(|s| s.code_hash.eq(hash))
     }
 
     pub fn is_spore_type(self, hash: &H256) -> bool {
@@ -427,11 +451,13 @@ impl Constants {
     );
 
     define_script!(
-        @diff
+        @diffmore
         xudt_type_script,
         {
-            Testnet =>  ScriptHashType::Type => "25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
-            Mainnet =>  ScriptHashType::Data1 => "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95"
+            (Testnet,V2) =>  ScriptHashType::Data1 => "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
+            (Testnet,V1) =>  ScriptHashType::Type => "98701eaf939113606a8a70013fd2e8f27b8f1e234acdc329f3d71f9e9d3d3233",
+            (Testnet,V0) =>  ScriptHashType::Type => "25c29dc317811a6f6f3985a7a9ebc4838bd388d19d0feeecf0bcd60f6c0975bb",
+            (Mainnet,V0) =>  ScriptHashType::Data1 => "50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95"
         }
     );
 
