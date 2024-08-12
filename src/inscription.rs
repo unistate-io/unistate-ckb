@@ -236,7 +236,7 @@ fn calc_xudt_type_script(
     let inscription_info_script = inscription_info_script.into();
     let owner_script = generate_owner_script(&inscription_info_script, constants);
 
-    packed::Script::from(constants.xudt_type_script())
+    packed::Script::from(constants.inscription_xudt_type_script())
         .as_builder()
         .args(generate_args(&owner_script))
         .build()
