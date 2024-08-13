@@ -386,7 +386,7 @@ fn index_xudt(
             if p.0
                 .type_
                 .as_ref()
-                .map(|t| constants.is_xudt_type(&t.code_hash))
+                .map(|t| constants.is_xudt_type(t))
                 .unwrap_or(false)
             {
                 debug!("Output is XUDT type");
@@ -396,7 +396,7 @@ fn index_xudt(
                 .0
                 .type_
                 .as_ref()
-                .map(|t| constants.unique_type_script().code_hash.eq(&t.code_hash))
+                .map(|t| constants.is_unique_type(t))
                 .unwrap_or(false)
             {
                 debug!("Output is UNIQUE type");
