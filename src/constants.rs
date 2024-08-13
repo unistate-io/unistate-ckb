@@ -160,6 +160,16 @@ macro_rules! define_versioned_deps {
     };
 }
 
+macro_rules! define_versioned_types {
+    ($self:ident, $type_script:ident, $($version:ident),*) => {
+        [
+            $(
+                $self.$type_script(Version::$version),
+            )*
+        ]
+    };
+}
+
 impl Constants {
     pub const fn spore_deps(self) -> [Option<CellDep>; 14] {
         define_versioned_deps!(self, V0, V1, V2)
@@ -188,17 +198,12 @@ impl Constants {
         self.inscription_info_dep().out_point.eq(&cd.out_point)
     }
 
+    const fn unique_types(self) -> [Option<Script>; 2] {
+        define_versioned_types!(self, unique_type_script, V0, V1)
+    }
+
     const fn xudt_types(self) -> [Option<Script>; 3] {
-        macro_rules! define_versioned_xudt_types {
-            ($self:ident, $($version:ident),*) => {
-                [
-                    $(
-                        $self.xudt_type_script(Version::$version),
-                    )*
-                ]
-            };
-        }
-        define_versioned_xudt_types!(self, V0, V1, V2)
+        define_versioned_types!(self, xudt_type_script, V0, V1, V2)
     }
 
     pub fn inscription_xudt_type_script(self) -> Script {
@@ -206,50 +211,38 @@ impl Constants {
     }
 
     pub const fn spore_types(self) -> [Option<Script>; 3] {
-        macro_rules! define_versioned_spore_types {
-            ($self:ident, $($version:ident),*) => {
-                [
-                    $(
-                        $self.spore_type_script(Version::$version),
-                    )*
-                ]
-            };
-        }
-        define_versioned_spore_types!(self, V0, V1, V2)
+        define_versioned_types!(self, spore_type_script, V0, V1, V2)
     }
 
     pub const fn cluster_types(self) -> [Option<Script>; 3] {
-        macro_rules! define_versioned_spore_types {
-            ($self:ident, $($version:ident),*) => {
-                [
-                    $(
-                        $self.cluster_type_script(Version::$version),
-                    )*
-                ]
-            };
-        }
-        define_versioned_spore_types!(self, V0, V1, V2)
+        define_versioned_types!(self, cluster_type_script, V0, V1, V2)
     }
 
-    pub fn is_xudt_type(self, hash: &H256) -> bool {
-        self.xudt_types()
-            .into_par_iter()
-            .flatten()
-            .any(|s| s.code_hash.eq(hash))
+    pub fn is_unique_type(self, script: &Script) -> bool {
+        self.check_type(self.unique_types(), script)
     }
 
-    pub fn is_spore_type(self, hash: &H256) -> bool {
-        self.spore_types()
-            .into_par_iter()
-            .flatten()
-            .any(|s| s.code_hash.eq(hash))
+    pub fn is_xudt_type(self, script: &Script) -> bool {
+        self.check_type(self.xudt_types(), script)
     }
 
-    pub fn is_cluster_type(self, hash: &H256) -> bool {
-        self.cluster_types()
+    pub fn is_spore_type(self, script: &Script) -> bool {
+        self.check_type(self.spore_types(), script)
+    }
+
+    pub fn is_cluster_type(self, script: &Script) -> bool {
+        self.check_type(self.cluster_types(), script)
+    }
+
+    fn check_type(
+        self,
+        types: impl IntoParallelIterator<Item = Option<Script>>,
+        script: &Script,
+    ) -> bool {
+        types
             .into_par_iter()
             .flatten()
-            .any(|s| s.code_hash.eq(hash))
+            .any(|s| s.code_hash.eq(&script.code_hash) && s.hash_type.eq(&script.hash_type))
     }
 
     define_script!(
@@ -482,11 +475,12 @@ impl Constants {
     );
 
     define_script!(
+        @diffmore
         unique_type_script,
-        ScriptHashType::Data1,
         {
-            Testnet => "8e341bcfec6393dcd41e635733ff2dca00a6af546949f70c57a706c0f344df8b",
-            Mainnet => "2c8c11c985da60b0a330c61a85507416d6382c130ba67f0c47ab071e00aec628"
+            (Testnet,V1) =>  ScriptHashType::Type => "8e341bcfec6393dcd41e635733ff2dca00a6af546949f70c57a706c0f344df8b",
+            (Testnet,V0) =>  ScriptHashType::Data1 => "8e341bcfec6393dcd41e635733ff2dca00a6af546949f70c57a706c0f344df8b",
+            (Mainnet,V0) =>  ScriptHashType::Data1=> "2c8c11c985da60b0a330c61a85507416d6382c130ba67f0c47ab071e00aec628"
         }
     );
 

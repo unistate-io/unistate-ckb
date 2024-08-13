@@ -97,14 +97,13 @@ fn index_spore(
                 .and_then(|s| s.args.as_bytes().get(..32).map(|v| v.to_vec()))
                 .zip(output_cell.type_.as_ref())
                 .and_then(|(id, type_script)| {
-                    let code_hash = &type_script.code_hash;
-                    if constants.is_spore_type(code_hash) {
+                    if constants.is_spore_type(type_script) {
                         debug!("is spore!");
                         spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes())
                             .ok()
                             .map(|reader| reader.to_entity())
                             .map(DataVariant::Spore)
-                    } else if constants.is_cluster_type(code_hash) {
+                    } else if constants.is_cluster_type(type_script) {
                         debug!("is cluster!");
                         spore_v2::ClusterDataV2Reader::from_compatible_slice(output_data.as_bytes())
                             .ok()
