@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
-use jsonrpsee::http_client::HttpClient;
+use futures::StreamExt;
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
@@ -10,25 +10,24 @@ use rayon::{
     prelude::{IntoParallelRefIterator as _, ParallelIterator as _},
 };
 use sea_orm::Set;
-use tokio::{sync::mpsc, task::JoinSet};
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::{
     database::Operations,
-    fetcher::Fetcher,
     schemas::{blockchain, rgbpp},
 };
 
 pub struct RgbppIndexer {
     txs: Vec<TransactionView>,
-    fetcher: Fetcher<HttpClient>,
+    fetcher: fetcher::HttpFetcher,
     op_sender: mpsc::UnboundedSender<Operations>,
 }
 
 impl RgbppIndexer {
     pub fn new(
         txs: Vec<TransactionView>,
-        fetcher: Fetcher<HttpClient>,
+        fetcher: fetcher::HttpFetcher,
         op_sender: mpsc::UnboundedSender<Operations>,
     ) -> Self {
         Self {
@@ -38,21 +37,28 @@ impl RgbppIndexer {
         }
     }
 
-    pub async fn index(self) -> Result<(), anyhow::Error> {
+    pub async fn index(self, redb: &fetcher::Database) -> Result<(), anyhow::Error> {
         let Self {
             txs,
             fetcher,
             op_sender,
         } = self;
 
-        let mut tasks = JoinSet::from_iter(
-            txs.into_par_iter()
-                .map(|tx| index_rgbpp_lock(fetcher.clone(), tx, op_sender.clone()))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
+        let tasks = txs
+            .into_par_iter()
+            .map(|tx| index_rgbpp_lock(fetcher.clone(), tx, op_sender.clone(), redb))
+            .collect::<Vec<_>>()
+            .into_iter();
 
-        while let Some(task) = tasks.join_next().await {
+        let (mut scope, _) = unsafe {
+            async_scoped::TokioScope::scope(|scope| {
+                for task in tasks {
+                    scope.spawn(task);
+                }
+            })
+        };
+
+        while let Some(task) = scope.next().await {
             task??;
         }
 
@@ -61,9 +67,10 @@ impl RgbppIndexer {
 }
 
 async fn index_rgbpp_lock(
-    fetcher: Fetcher<HttpClient>,
+    fetcher: fetcher::HttpFetcher,
     tx: TransactionView,
     op_sender: mpsc::UnboundedSender<Operations>,
+    redb: &fetcher::Database,
 ) -> anyhow::Result<()> {
     debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
 
@@ -84,7 +91,7 @@ async fn index_rgbpp_lock(
         })
         .try_for_each(|unlock| upsert_rgbpp_unlock(op_sender.clone(), &unlock, tx.hash.clone()))?;
 
-    let pre_outputs = fetcher.get_outputs(tx.inner.inputs).await?;
+    let pre_outputs = fetcher.get_outputs(redb, tx.inner.inputs).await?;
 
     pre_outputs
         .par_iter()
