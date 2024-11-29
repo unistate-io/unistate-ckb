@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use ckb_fixed_hash_core::H256;
 use ckb_jsonrpc_types::{CellDep, DepType, JsonBytes, OutPoint, Script, ScriptHashType, Uint32};
 use ckb_sdk::NetworkType;
@@ -15,18 +13,20 @@ pub const SECP256K1_WITNESS_LOCK_SIZE: u8 = 65;
 pub const BTC_JUMP_CONFIRMATION_BLOCKS: u64 = 6;
 pub const RGBPP_TX_WITNESS_MAX_SIZE: usize = 5000;
 pub const RGBPP_TX_INPUTS_MAX_LENGTH: usize = 10;
-
+pub const MB: u32 = 1048576;
 pub const RGBPP_WITNESS_PLACEHOLDER: &str = "0xFF";
 pub const RGBPP_TX_ID_PLACEHOLDER: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
 const fn convert(value: u32) -> Uint32 {
+    #[allow(dead_code)]
     struct JsonUint32(u32);
     let src = JsonUint32(value);
     unsafe { std::mem::transmute(src) }
 }
 
 const fn const_default_bytes() -> JsonBytes {
+    #[allow(dead_code)]
     struct DefaultJsonBytes(Bytes);
     const EMPTY: &[u8] = &[];
 
@@ -186,6 +186,7 @@ impl Constants {
     #[inline]
     pub fn is_xudt(self, cd: &CellDep) -> bool {
         self.xudt_type_dep().out_point.eq(&cd.out_point)
+            || self.ickb_logic_type_dep().out_point.eq(&cd.out_point)
     }
 
     #[inline]
@@ -530,6 +531,25 @@ impl Constants {
         }
     );
 
+    define_cell_dep!(
+        ickb_logic_type_dep,
+        DepType::DepGroup,
+        0x0,
+        {
+            Testnet=> "f7ece4fb33d8378344cab11fcd6a4c6f382fd4207ac921cf5821f30712dcd311",
+            Mainnet => "621a6f38de3b9f453016780edac3b26bfcbfa3e2ecb47c2da275471a5d3ed165"
+        }
+    );
+
+    define_script!(
+        ickb_logic_type_script,
+        ScriptHashType::Data1,
+        {
+            Testnet => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3",
+            Mainnet => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3"
+        }
+    );
+
     define_script!(
         rgbpp_lock_script,
         ScriptHashType::Type,
@@ -585,4 +605,52 @@ impl Constants {
             (Testnet, V2) => "c5a41d58155b11ecd87a5a49fdcb6e83bd6684d3b72b2f3686f081945461c156",
         }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ckb_unit() {
+        assert_eq!(CKB_UNIT, 100000000);
+    }
+
+    #[test]
+    fn test_max_fee() {
+        assert_eq!(MAX_FEE, 200000000);
+    }
+
+    #[test]
+    fn test_min_capacity() {
+        assert_eq!(MIN_CAPACITY, 61 * 100000000);
+    }
+
+    #[test]
+    fn test_secp256k1_witness_lock_size() {
+        assert_eq!(SECP256K1_WITNESS_LOCK_SIZE, 65);
+    }
+
+    #[test]
+    fn test_rgbpp_tx_witness_max_size() {
+        assert_eq!(RGBPP_TX_WITNESS_MAX_SIZE, 5000);
+    }
+
+    #[test]
+    fn test_rgbpp_tx_inputs_max_length() {
+        assert_eq!(RGBPP_TX_INPUTS_MAX_LENGTH, 10);
+    }
+
+    #[test]
+    fn test_rgbpp_witness_placeholder() {
+        assert_eq!(RGBPP_WITNESS_PLACEHOLDER, "0xFF");
+    }
+
+    #[test]
+    fn test_rgbpp_tx_id_placeholder() {
+        assert_eq!(
+            RGBPP_TX_ID_PLACEHOLDER,
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
 }

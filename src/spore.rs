@@ -1,9 +1,6 @@
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::{packed, H256};
-use molecule::{
-    bytes::Buf,
-    prelude::{Entity, Reader as _},
-};
+use molecule::{bytes::Buf, prelude::Reader as _};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator as _, IntoParallelRefIterator, ParallelIterator,
 };
@@ -12,7 +9,6 @@ use tokio::sync::mpsc;
 use tracing::{debug, error};
 
 use crate::{
-    constants::Constants,
     database::Operations,
     entity::{self, addresses},
     schemas::{
@@ -20,6 +16,8 @@ use crate::{
         top_level::{WitnessLayoutReader, WitnessLayoutUnionReader},
     },
 };
+
+use constants::Constants;
 
 pub struct SporeTx {
     pub tx: TransactionView,
@@ -524,7 +522,8 @@ mod tests {
     use tokio::sync::mpsc;
     use tracing::debug;
 
-    use crate::{constants::Constants, spore::index_spore};
+    use crate::spore::index_spore;
+    use constants::Constants;
 
     #[test]
     #[tracing_test::traced_test]

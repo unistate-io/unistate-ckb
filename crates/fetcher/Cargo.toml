@@ -1,0 +1,26 @@
+[package]
+name = "unistate-fetcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-jsonrpc-types = { workspace = true }
+ckb-sdk = { workspace = true }
+ckb-types = { workspace = true }
+jsonrpsee = { workspace = true, features = ["client", "macros"] }
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [] }
+tracing = { workspace = true }
+redb = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[features]
+default = []
+cache = ["redb", "bincode"]
