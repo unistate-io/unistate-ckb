@@ -1,8 +1,8 @@
 [unistate]
 url = "https://ckb-rpc.unistate.io"
-initial_height = 11922670
-batch_size = 300
+initial_height = 14231253
+batch_size = 10
 interval = 1
 level = "Info"
 featcher.max_retries = 5
-featcher.max_response_size = 1000
+featcher.max_response_size = 1048576000 # 1000 MB

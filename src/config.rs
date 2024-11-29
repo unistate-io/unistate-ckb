@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use ckb_sdk::NetworkType;
+use constants::MB;
 use serde::Deserialize;
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -8,6 +11,22 @@ pub(crate) struct Config {
     pub(crate) database_url: String,
     #[serde(default)]
     pub(crate) pool: PoolConfig,
+}
+
+impl Config {
+    pub fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+        let fc = &self.unistate.featcher;
+
+        let fetcher = fetcher::HttpFetcher::http_client(
+            &self.unistate.url,
+            fc.retry_interval,
+            fc.max_retries,
+            fc.max_response_size,
+            fc.max_request_size,
+        )?;
+
+        Ok(fetcher)
+    }
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -26,6 +45,7 @@ pub(crate) struct FeatcherConfig {
     pub(crate) max_retries: usize,
     pub(crate) max_response_size: u32, // 默认是 10485760 即 10mb
     pub(crate) max_request_size: u32,
+    pub(crate) redb_path: PathBuf,
 }
 
 impl Default for FeatcherConfig {
@@ -33,8 +53,9 @@ impl Default for FeatcherConfig {
         Self {
             retry_interval: 500,
             max_retries: 5,
-            max_request_size: 100,
-            max_response_size: 100,
+            max_request_size: 100 * MB,
+            max_response_size: 100 * MB,
+            redb_path: PathBuf::from("unistate.redb"),
         }
     }
 }
