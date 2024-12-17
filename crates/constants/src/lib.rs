@@ -39,6 +39,8 @@ pub enum Version {
     V0,
     V1,
     V2,
+    V3,
+    V4,
 }
 
 macro_rules! define_network_item {
