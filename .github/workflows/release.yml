@@ -8,25 +8,29 @@ on:
     types: [created]
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
-      - uses: actions-rs/cargo@v1
+      - name: Cache dependencies
+        uses: actions-rs/cargo@v1
+        with:
+          command: cache
+          action: restore
+      - name: Install dependencies
+        uses: actions-rs/cargo@v1
         with:
           command: install
           args: --bin <your-binary-name>
-      - uses: actions-rs/cargo@v1
+      - name: Run tests
+        uses: actions-rs/cargo@v1
         with:
           command: test
-      - uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --release --bin <your-binary-name>
       - name: Get current tag
         id: get-tag
         run: echo "::set-output name=tag::$(git tag --points-at HEAD)"
@@ -40,12 +44,22 @@ jobs:
           release_name: Release ${{ steps.get-tag.outputs.tag }}
           draft: false
           prerelease: false
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
+      - name: Rust Release binary
+        uses: rust-build/rust-build.action@v1.4.5
+        with:
+          RUSTTARGET: x86_64-unknown-linux-gnu
+          ARCHIVE_TYPES: zip
+          ARCHIVE_NAME: unistate-ckb-${{ steps.get-tag.outputs.tag }}-linux-x86_64.zip
+          UPLOAD_MODE: release
+          UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
+          TOOLCHAIN_VERSION: stable
+          STATIC_LINKING: true
+          PROFILE: release
+          EXTRA_FEATURES: default
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Refresh cargo cache
+        uses: actions-rs/cargo@v1
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: target/release/<your-binary-name>
-          asset_name: <your-binary-name>-linux-x86_64
-          asset_content_type: application/octet-stream
+          command: cache
+          action: store
