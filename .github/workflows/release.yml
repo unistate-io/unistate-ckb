@@ -8,16 +8,23 @@ jobs:
   release:
     name: Release Packaging
     env:
-      PROJECT_NAME_UNDERSCORE: rust_ci_github_actions_workflow
+      PROJECT_NAME: unistate-ckb # 修改为你的项目名称
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Release Build
+
+      - name: Build Project
         run: cargo build --release
-      - name: "Upload Artifact"
+
+      - name: List Files in Target Directory
+        run: ls -la target/release/
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.PROJECT_NAME_UNDERSCORE }}
-          path: target/release/${{ env.PROJECT_NAME_UNDERSCORE }}
+          name: ${{ env.PROJECT_NAME }}
+          path: target/release/${{ env.PROJECT_NAME }}
