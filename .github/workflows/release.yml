@@ -1,14 +1,12 @@
 on:
   release:
-    types: [created, edited]
+    types: [created]
 
 name: Release Packaging
 
 jobs:
   release:
     name: Release Packaging
-    env:
-      PROJECT_NAME: unistate-ckb # 修改为你的项目名称
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -23,8 +21,11 @@ jobs:
       - name: List Files in Target Directory
         run: ls -la target/release/
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Release Asset
+        uses: svenstaro/upload-release-action@v2
         with:
-          name: ${{ env.PROJECT_NAME }}
-          path: target/release/${{ env.PROJECT_NAME }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          asset_name: unistate-ckb
+          file: target/release/unistate-ckb
+          tag: ${{ github.ref_name }}
+          overwrite: true
