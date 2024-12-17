@@ -1,65 +1,23 @@
-name: Release Workflow
+name: Release
 
 on:
-  push:
-    branches:
-      - main
   release:
     types: [created]
 
 jobs:
-  build-and-release:
+  release:
+    name: Build and release for Linux
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-      - name: Cache dependencies
-        uses: actions-rs/cargo@v1
-        with:
-          command: cache
-          action: restore
-      - name: Install dependencies
-        uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: --bin <your-binary-name>
-      - name: Run tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-      - name: Get current tag
-        id: get-tag
-        run: echo "::set-output name=tag::$(git tag --points-at HEAD)"
-      - name: Create GitHub release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.get-tag.outputs.tag }}
-          release_name: Release ${{ steps.get-tag.outputs.tag }}
-          draft: false
-          prerelease: false
-      - name: Rust Release binary
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
-        with:
-          RUSTTARGET: x86_64-unknown-linux-gnu
-          ARCHIVE_TYPES: zip
-          ARCHIVE_NAME: unistate-ckb-${{ steps.get-tag.outputs.tag }}-linux-x86_64.zip
-          UPLOAD_MODE: release
-          UPLOAD_URL: ${{ steps.create_release.outputs.upload_url }}
-          TOOLCHAIN_VERSION: stable
-          STATIC_LINKING: true
-          PROFILE: release
-          EXTRA_FEATURES: default
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Refresh cargo cache
-        uses: actions-rs/cargo@v1
         with:
-          command: cache
-          action: store
+          RUSTTARGET: x86_64-unknown-linux-musl
+          ARCHIVE_TYPES: tar.gz
+          ARCHIVE_NAME: my_project.tar.gz
