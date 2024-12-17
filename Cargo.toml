@@ -65,7 +65,7 @@ sea-orm = { workspace = true, features = [
     "with-chrono",
     "with-bigdecimal",
 ], default-features = false }
-bigdecimal = { workspace = true } 
+bigdecimal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 chrono = { workspace = true, features = ["serde"] }
 sha3 = { workspace = true }
@@ -95,3 +95,8 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 [[bench]]
 name = "categorize"
 harness = false
+
+[profile.release]
+debug = "limited"
+lto = "thin"
+codegen-units = 1

@@ -3,3 +3,4 @@
 *.redb
 *.diff
 *.test
+.env
