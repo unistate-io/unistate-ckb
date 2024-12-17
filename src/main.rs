@@ -1,6 +1,6 @@
 use async_scoped::spawner::use_tokio::Tokio;
+use clap::Parser;
 use core::time::Duration;
-use pico_args::Arguments;
 use std::path::PathBuf;
 
 use ckb_jsonrpc_types::{BlockNumber, TransactionView};
@@ -128,29 +128,17 @@ async fn run_with_watchdog(indexer: &mut Indexer) -> Result<()> {
     }
 }
 
-fn parse_args() -> Result<Option<bool>> {
-    let mut args = Arguments::from_env();
-
-    if args.contains(["-h", "--help"]) {
-        print_help();
-        std::process::exit(0);
-    }
-
-    let apply_init_height = args.opt_value_from_str(["-a", "--apply-init-height"])?;
-
-    let remaining = args.finish();
-    if !remaining.is_empty() {
-        eprintln!("Warning: Unused arguments: {:?}", remaining);
-    }
-
-    Ok(apply_init_height)
+#[derive(Parser)]
+#[command(name = "unistate-ckb", about = "Unistate CKB Indexer", long_about = None, version)]
+struct Cli {
+    /// Apply initial height (true/false)
+    #[arg(short, long, value_parser)]
+    apply_init_height: Option<bool>,
 }
 
-fn print_help() {
-    println!("Usage: unistate-ckb [OPTIONS]");
-    println!("Options:");
-    println!("  -h, --help                 Print this help message");
-    println!("  -a, --apply-init-height    Apply initial height (true/false)");
+fn parse_args() -> Result<Option<bool>> {
+    let cli = Cli::parse();
+    Ok(cli.apply_init_height)
 }
 
 fn setup_environment() -> Result<()> {
@@ -179,6 +167,7 @@ fn setup_logging(config: &Config) -> Result<()> {
 
     Ok(())
 }
+
 async fn setup_database(config: &Config) -> Result<DbConn> {
     let mut opt = ConnectOptions::new(&config.database_url);
     let pool = &config.pool;
