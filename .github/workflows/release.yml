@@ -1,23 +1,26 @@
-name: Release
-
 on:
   release:
-    types: [created]
+    types: [created, edited]
+
+name: Release Packaging
 
 jobs:
   release:
-    name: Build and release for Linux
+    name: Release Packaging
+    env:
+      PROJECT_NAME_UNDERSCORE: rust_ci_github_actions_workflow
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
         with:
-          RUSTTARGET: x86_64-unknown-linux-musl
-          ARCHIVE_TYPES: tar.gz
-          ARCHIVE_NAME: my_project.tar.gz
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Release Build
+        run: cargo build --release
+      - name: "Upload Artifact"
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ env.PROJECT_NAME_UNDERSCORE }}
+          path: target/release/${{ env.PROJECT_NAME_UNDERSCORE }}
