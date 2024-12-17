@@ -21,7 +21,7 @@ jobs:
       - name: Extract Package Name from Cargo.toml
         id: extract_package_name
         run: |
-          PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | sed 's/name\s*=\s*"\(.*\)"/\1/')
+          PACKAGE_NAME=$(grep -m 1 '^name\s*=' Cargo.toml | sed 's/name\s*=\s*"\(.*\)"/\1/')
           echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
 
       - name: Build Project
