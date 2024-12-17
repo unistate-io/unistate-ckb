@@ -145,7 +145,7 @@ impl Constants {
     }
 }
 
-macro_rules! define_versioned_deps {
+macro_rules! define_spore_versioned_deps {
     ($self:ident, $($version:ident),*) => {
         [
             $(
@@ -156,6 +156,17 @@ macro_rules! define_versioned_deps {
             )*
             $self.lua_dep(),
             $self.mutant_dep(),
+        ]
+    };
+}
+
+macro_rules! define_xudt_versioned_deps {
+    ($self:ident, $($version:ident),*) => {
+        [
+            $(
+                $self.ickb_logic_type_dep(Version::$version),
+            )*
+            Some($self.xudt_type_dep()),
         ]
     };
 }
@@ -172,7 +183,11 @@ macro_rules! define_versioned_types {
 
 impl Constants {
     pub const fn spore_deps(self) -> [Option<CellDep>; 14] {
-        define_versioned_deps!(self, V0, V1, V2)
+        define_spore_versioned_deps!(self, V0, V1, V2)
+    }
+
+    pub const fn xudt_deps(self) -> [Option<CellDep>; 6] {
+        define_xudt_versioned_deps!(self, V0, V1, V2, V3, V4)
     }
 
     #[inline]
@@ -185,8 +200,10 @@ impl Constants {
 
     #[inline]
     pub fn is_xudt(self, cd: &CellDep) -> bool {
-        self.xudt_type_dep().out_point.eq(&cd.out_point)
-            || self.ickb_logic_type_dep().out_point.eq(&cd.out_point)
+        self.xudt_deps()
+            .into_par_iter()
+            .flatten()
+            .any(|dep| dep.out_point.eq(&cd.out_point))
     }
 
     #[inline]
@@ -492,7 +509,7 @@ impl Constants {
             (Testnet,V0) => "598d793defef36e2eeba54a9b45130e4ca92822e1d193671f490950c3b856080",
             (Testnet,V1) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075",
             (Testnet,V2) => "0bbe768b519d8ea7b96d58f1182eb7e6ef96c541fbd9526975077ee09f049058",
-            (Mainnet,V1) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075"
+            (Mainnet,V0) => "7366a61534fa7c7e6225ecc0d828ea3b5366adec2b58206f2ee84995fe030075"
         }
     );
 
@@ -503,7 +520,7 @@ impl Constants {
             (Testnet,V0) => "bbad126377d45f90a8ee120da988a2d7332c78ba8fd679aab478a19d6c133494",
             (Testnet,V1) => "5e063b4c0e7abeaa6a428df3b693521a3050934cf3b0ae97a800d1bc31449398",
             (Testnet,V2) => "685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d",
-            (Mainnet,V1) => "4a4dce1df3dffff7f8b2cd7dff7303df3b6150c9788cb75dcf6747247132b9f5"
+            (Mainnet,V0) => "4a4dce1df3dffff7f8b2cd7dff7303df3b6150c9788cb75dcf6747247132b9f5"
         }
     );
 
@@ -515,7 +532,7 @@ impl Constants {
             (Testnet,V0) => "fd694382e621f175ddf81ce91ce2ecf8bfc027d53d7d31b8438f7d26fc37fd19",
             (Testnet,V1) => "06995b9fc19461a2bf9933e57b69af47a20bf0a5bc6c0ffcb85567a2c733f0a1",
             (Testnet,V2) => "5e8d2a517d50fd4bb4d01737a7952a1f1d35c8afc77240695bb569cd7d9d5a1f",
-            (Mainnet,V1) => "96b198fb5ddbd1eed57ed667068f1f1e55d07907b4c0dbd38675a69ea1b69824"
+            (Mainnet,V0) => "96b198fb5ddbd1eed57ed667068f1f1e55d07907b4c0dbd38675a69ea1b69824"
         }
     );
 
@@ -527,7 +544,7 @@ impl Constants {
             (Testnet,V0) => "49551a20dfe39231e7db49431d26c9c08ceec96a29024eef3acc936deeb2ca76",
             (Testnet,V1) => "fbceb70b2e683ef3a97865bb88e082e3e5366ee195a9c826e3c07d1026792fcd",
             (Testnet,V2) => "cebb174d6e300e26074aea2f5dbd7f694bb4fe3de52b6dfe205e54f90164510a",
-            (Mainnet,V1) => "e464b7fb9311c5e2820e61c99afc615d6b98bdefbe318c34868c010cbd0dc938"
+            (Mainnet,V0) => "e464b7fb9311c5e2820e61c99afc615d6b98bdefbe318c34868c010cbd0dc938"
         }
     );
 
@@ -536,8 +553,12 @@ impl Constants {
         DepType::DepGroup,
         0x0,
         {
-            Testnet=> "f7ece4fb33d8378344cab11fcd6a4c6f382fd4207ac921cf5821f30712dcd311",
-            Mainnet => "621a6f38de3b9f453016780edac3b26bfcbfa3e2ecb47c2da275471a5d3ed165"
+            (Testnet,V4)=> "f7ece4fb33d8378344cab11fcd6a4c6f382fd4207ac921cf5821f30712dcd311",
+            (Testnet,V3)=> "e4f26ba0bd0557b643bd2050c998b407f852e82a32a44338536514454a96ee3c",
+            (Testnet,V2)=> "45c23afa7c08821d329a99b3b6357aa8151c4d587875fd228be1f32cbfaf20a1",
+            (Testnet,V1)=> "3a2efebb9bbf9f1526727121da080daa28450f8acd8bd759ffde71057a5e00f9",
+            (Testnet,V0)=> "2892fd50cc48b986eccc9cd36c1723be3d304181374af1a22135d227682f5d84",
+            (Mainnet,V0) => "621a6f38de3b9f453016780edac3b26bfcbfa3e2ecb47c2da275471a5d3ed165"
         }
     );
 
@@ -545,8 +566,10 @@ impl Constants {
         ickb_logic_type_script,
         ScriptHashType::Data1,
         {
-            Testnet => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3",
-            Mainnet => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3"
+            (Testnet,V2) => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3",
+            (Testnet,V1)=> "ca26967103f2668d20e6d5528822cbcf368bb21e01dfacfac2a91c10b86cf734",
+            (Testnet,V0)=> "b0548ea01aeca772c03e21308462cbc87c46a3ba534e38144ffacd0de6cdebc8",
+            (Mainnet,V0) => "2a8100ab5990fa055ab1b50891702e1e895c7bd1df6322cd725c1a6115873bd3"
         }
     );
 
