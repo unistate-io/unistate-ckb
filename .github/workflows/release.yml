@@ -18,17 +18,29 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Extract Package Name from Cargo.toml
+        id: extract_package_name
+        run: |
+          PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | sed 's/name\s*=\s*"\(.*\)"/\1/')
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
+
       - name: Build Project
         run: cargo build --release
 
       - name: List Files in Target Directory
         run: ls -la target/release/
 
+      - name: Create Tarball
+        run: tar czf ${PACKAGE_NAME}.tar.gz -C target/release ${PACKAGE_NAME}
+
+      - name: List Files in Current Directory
+        run: ls -la
+
       - name: Upload Release Asset
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          asset_name: unistate-ckb
-          file: target/release/unistate-ckb
+          asset_name: ${PACKAGE_NAME}.tar.gz
+          file: ${PACKAGE_NAME}.tar.gz
           tag: ${{ github.ref_name }}
           overwrite: true
