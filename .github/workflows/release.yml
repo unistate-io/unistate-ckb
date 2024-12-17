@@ -11,18 +11,15 @@ jobs:
   release:
     name: Release Packaging
     runs-on: ubuntu-latest
+    env:
+      PACKAGE_NAME: unistate-ckb
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Extract Package Name from Cargo.toml
-        id: extract_package_name
-        run: |
-          PACKAGE_NAME=$(grep -m 1 '^name\s*=' Cargo.toml | sed 's/name\s*=\s*"\(.*\)"/\1/')
-          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
 
       - name: Build Project
         run: cargo build --release
@@ -31,16 +28,23 @@ jobs:
         run: ls -la target/release/
 
       - name: Create Tarball
-        run: tar czf ${PACKAGE_NAME}.tar.gz -C target/release ${PACKAGE_NAME}
+        run: tar czf ${{ env.PACKAGE_NAME }}.tar.gz -C target/release ${{ env.PACKAGE_NAME }}
 
       - name: List Files in Current Directory
         run: ls -la
+
+      - name: Check if Tarball Exists
+        run: |
+          if [ ! -f "${{ env.PACKAGE_NAME }}.tar.gz" ]; then
+            echo "Tarball does not exist!"
+            exit 1
+          fi
 
       - name: Upload Release Asset
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          asset_name: ${PACKAGE_NAME}.tar.gz
-          file: ${PACKAGE_NAME}.tar.gz
+          asset_name: ${{ env.PACKAGE_NAME }}.tar.gz
+          file: ${{ env.PACKAGE_NAME }}.tar.gz
           tag: ${{ github.ref_name }}
           overwrite: true
