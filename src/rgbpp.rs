@@ -37,7 +37,7 @@ impl RgbppIndexer {
         }
     }
 
-    pub async fn index(self, redb: &fetcher::Database) -> Result<(), anyhow::Error> {
+    pub async fn index(self) -> Result<(), anyhow::Error> {
         let Self {
             txs,
             fetcher,
@@ -46,7 +46,7 @@ impl RgbppIndexer {
 
         let tasks = txs
             .into_par_iter()
-            .map(|tx| index_rgbpp_lock(fetcher.clone(), tx, op_sender.clone(), redb))
+            .map(|tx| index_rgbpp_lock(fetcher.clone(), tx, op_sender.clone()))
             .collect::<Vec<_>>()
             .into_iter();
 
@@ -70,7 +70,6 @@ async fn index_rgbpp_lock(
     fetcher: fetcher::HttpFetcher,
     tx: TransactionView,
     op_sender: mpsc::UnboundedSender<Operations>,
-    redb: &fetcher::Database,
 ) -> anyhow::Result<()> {
     debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
 
@@ -91,7 +90,7 @@ async fn index_rgbpp_lock(
         })
         .try_for_each(|unlock| upsert_rgbpp_unlock(op_sender.clone(), &unlock, tx.hash.clone()))?;
 
-    let pre_outputs = fetcher.get_outputs(redb, tx.inner.inputs).await?;
+    let pre_outputs = fetcher.get_outputs(tx.inner.inputs).await?;
 
     pre_outputs
         .par_iter()

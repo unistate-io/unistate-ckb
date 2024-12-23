@@ -4797,7 +4797,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "unistate-ckb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-scoped",
@@ -4848,17 +4848,19 @@ dependencies = [
 
 [[package]]
 name = "unistate-fetcher"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "ckb-jsonrpc-types",
  "ckb-sdk",
  "ckb-types",
  "jsonrpsee",
+ "parking_lot",
  "rayon",
  "redb",
  "serde",
  "serde_json",
+ "smallvec",
  "thiserror 2.0.3",
  "tokio",
  "tracing",

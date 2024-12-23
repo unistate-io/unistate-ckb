@@ -1,7 +1,6 @@
 use async_scoped::spawner::use_tokio::Tokio;
 use clap::Parser;
 use core::time::Duration;
-use std::path::PathBuf;
 
 use ckb_jsonrpc_types::{BlockNumber, TransactionView};
 
@@ -83,7 +82,7 @@ async fn main() -> Result<()> {
     info!("config: {config:#?}");
 
     let db = setup_database(&config).await?;
-    let client = config.http_fetcher()?;
+    let client = config.http_fetcher().await?;
 
     let (initial_height, network, constants) =
         initialize_blockchain_data(&db, &config, apply_init_height).await?;
@@ -231,7 +230,6 @@ struct Indexer {
     interval: f32,
     fetch_size: usize,
     client: fetcher::HttpFetcher,
-    redb_path: PathBuf,
     db: DbConn,
     constants: constants::Constants,
     network: NetworkType,
@@ -249,7 +247,6 @@ impl Indexer {
         let max_batch_size = config.unistate.optional_config.batch_size;
         let interval = config.unistate.optional_config.interval;
         let fetch_size = config.unistate.optional_config.fetch_size;
-        let redb_path = config.unistate.featcher.redb_path.clone();
         Self {
             height: initial_height,
             target_height: 0,
@@ -259,22 +256,15 @@ impl Indexer {
             fetch_size,
             client,
             db,
-            redb_path,
             constants,
             network,
         }
-    }
-
-    fn redb(&self) -> Result<fetcher::Database> {
-        let redb = fetcher::Database::create(self.redb_path.as_path())?;
-        Ok(redb)
     }
 
     async fn run(&mut self) -> Result<()> {
         self.update_target_height().await?;
 
         let mut pre_handle = None;
-        let redb = self.redb()?;
         let mut scope = unsafe { async_scoped::TokioScope::create(Tokio) };
         loop {
             self.log_progress();
@@ -285,8 +275,7 @@ impl Indexer {
                 DatabaseProcessor::new(self.db.clone(), self.height);
             let processor_handle = tokio::spawn(database_processor.handle());
 
-            let handle =
-                self.spawn_indexing_task(numbers, op_sender, commited, pre_handle.take(), &redb);
+            let handle = self.spawn_indexing_task(numbers, op_sender, commited, pre_handle.take());
             scope.spawn(handle);
             pre_handle = Some(processor_handle);
 
@@ -343,7 +332,6 @@ impl Indexer {
         op_sender: mpsc::UnboundedSender<Operations>,
         commited: oneshot::Sender<()>,
         pre_handle: Option<JoinHandle<Result<()>>>,
-        redb: &'r fetcher::Database,
     ) -> impl Future<Output = Result<()>> + use<'r> {
         let fetcher = self.client.clone();
         let constants = self.constants;
@@ -351,7 +339,7 @@ impl Indexer {
 
         async move {
             let categorized_txs =
-                fetch_and_categorize_transactions(&fetcher, redb, numbers, &constants).await?;
+                fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
 
             let (spore_sender, xudt_sender, rgbpp_sender) =
                 (op_sender.clone(), op_sender.clone(), op_sender.clone());
@@ -378,7 +366,7 @@ impl Indexer {
                             fetcher,
                             rgbpp_sender,
                         );
-                        rgbpp_idxer.index(redb).await
+                        rgbpp_idxer.index().await
                     });
                     scope.spawn_blocking(move || {
                         let inscription_idxer = inscription::InscriptionInfoIndexer::new(
@@ -412,7 +400,6 @@ impl Indexer {
 
 async fn fetch_and_categorize_transactions(
     fetcher: &fetcher::HttpFetcher,
-    redb: &fetcher::Database,
     numbers: Vec<BlockNumber>,
     constants: &constants::Constants,
 ) -> Result<CategorizedTxs> {
@@ -446,7 +433,10 @@ async fn fetch_and_categorize_transactions(
                             txs.inscription_txs.push(tx.clone());
                         }
 
-                        let _ = fetcher::cache_transaction(redb, tx);
+                        if let Some(db) = fetcher.db.clone() {
+                            let db = db.read();
+                            let _ = fetcher::cache_transaction(&*db, tx);
+                        }
 
                         txs
                     })
