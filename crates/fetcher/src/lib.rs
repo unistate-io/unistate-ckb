@@ -1,7 +1,12 @@
-#[cfg(feature = "cache")]
 mod wrapper;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use ckb_jsonrpc_types::{
     BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, OutPoint, Transaction,
@@ -10,31 +15,24 @@ use ckb_jsonrpc_types::{
 use ckb_sdk::rpc::ResponseFormatGetter;
 use ckb_types::H256;
 use jsonrpsee::{
-    core::{
-        client::{BatchResponse, ClientT},
-        params::BatchRequestBuilder,
-    },
+    core::{client::ClientT, params::BatchRequestBuilder},
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
+use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-#[cfg(feature = "cache")]
 use redb::{ReadableTable as _, TableDefinition};
 
+use smallvec::SmallVec;
 use thiserror::Error;
-use tracing::debug;
-
-#[cfg(feature = "cache")]
+use tracing::{debug, info, warn};
 use wrapper::Bincode;
 
-#[cfg(feature = "cache")]
 pub use redb::{Database, Error as RedbError};
 
-#[cfg(feature = "cache")]
 const TX_TABLE: TableDefinition<Bincode<H256>, Bincode<Transaction>> =
     TableDefinition::new("transactions");
 
-#[cfg(feature = "cache")]
 const TX_COUNT_TABLE: TableDefinition<Bincode<H256>, u64> =
     TableDefinition::new("transaction_counts");
 
@@ -84,7 +82,6 @@ pub enum Error {
     #[error("There was a problem deserializing data. Details: {0}")]
     SerdeJson(#[from] serde_json::Error),
 
-    #[cfg(feature = "cache")]
     /// Represents an error related to database operations.
     ///
     /// Wraps the underlying `redb::Error`.
@@ -94,47 +91,17 @@ pub enum Error {
 
 #[derive(Debug, Clone)]
 pub struct Fetcher<C> {
-    client: C,
+    clients: SmallVec<[C; 2]>,
+    current_index: Arc<AtomicUsize>,
     retry_interval: u64,
     max_retries: usize,
+    pub db: Option<Arc<RwLock<redb::Database>>>,
 }
 
-macro_rules! retry {
-    ($call:expr, $max_retries:expr, $retry_interval:expr) => {{
-        let mut retries = 0;
-        let max_retries = $max_retries;
-        let retry_interval = std::time::Duration::from_millis($retry_interval);
-
-        loop {
-            match $call {
-                Ok(res) => break Ok(res),
-                Err(err) => {
-                    retries += 1;
-                    if retries > max_retries {
-                        break Err(err);
-                    }
-                    tokio::time::sleep(retry_interval).await;
-                }
-            }
-        }
-    }};
-}
-
-#[cfg(feature = "cache")]
 mod cache {
     use ckb_jsonrpc_types::TransactionView;
 
     use super::*;
-
-    pub fn init_redb(db: &redb::Database) -> Result<(), redb::Error> {
-        let write_txn = db.begin_write()?;
-        {
-            let _ = write_txn.open_table(TX_TABLE)?;
-            let _ = write_txn.open_table(TX_COUNT_TABLE)?;
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
 
     pub fn clear_transactions_below_count(
         db: &redb::Database,
@@ -280,53 +247,98 @@ mod cache {
     }
 }
 
-#[cfg(feature = "cache")]
 pub use cache::*;
 
 impl<C> Fetcher<C>
 where
     C: ClientT,
 {
-    pub fn new(client: C, retry_interval: u64, max_retries: usize) -> Self {
+    fn client(&self) -> &C {
+        self.get_client(self.current_index.load(Ordering::Relaxed))
+    }
+
+    fn get_client(&self, idx: usize) -> &C {
+        unsafe { &self.clients.get_unchecked(idx) }
+    }
+
+    pub fn new(clients: SmallVec<[C; 2]>, retry_interval: u64, max_retries: usize) -> Self {
         Self {
-            client,
+            clients,
             retry_interval,
             max_retries,
+            db: None,
+            current_index: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    async fn sort_clients_by_speed(&self) -> usize {
+        let mut fastest_index = 0;
+        let mut fastest_duration = std::time::Duration::from_secs(u64::MAX);
+
+        // Test each client's response time
+        for (index, client) in self.clients.iter().enumerate() {
+            let start = std::time::Instant::now();
+            let result = client
+                .request::<BlockNumber, _>("get_tip_block_number", rpc_params!())
+                .await;
+            let duration = start.elapsed();
+
+            // Only consider successful requests
+            if result.is_ok() && duration < fastest_duration {
+                fastest_duration = duration;
+                fastest_index = index;
+            }
+        }
+
+        self.current_index.store(fastest_index, Ordering::Relaxed);
+
+        fastest_index
+    }
+
+    pub fn init_redb(&mut self, db: redb::Database) -> Result<(), redb::Error> {
+        let write_txn = db.begin_write()?;
+        {
+            let _ = write_txn.open_table(TX_TABLE)?;
+            let _ = write_txn.open_table(TX_COUNT_TABLE)?;
+        }
+        write_txn.commit()?;
+
+        self.db = Some(Arc::new(RwLock::new(db)));
+
+        Ok(())
     }
 
     pub async fn get_txs_by_hashes(
         &self,
-        #[cfg(feature = "cache")] db: &redb::Database,
         hashes: Vec<H256>,
     ) -> Result<HashMap<H256, Transaction>, Error> {
         debug!("Getting transactions by hashes: {:?}", hashes);
 
-        #[cfg(feature = "cache")]
-        {
-            // Try to get cached transactions first
-            let mut result = get_cached_transactions(db, &hashes)?;
+        if let Some(db) = self.db.clone() {
+            {
+                let db_guard = db.read();
+                let mut result = get_cached_transactions(&*db_guard, &hashes)?;
 
-            // Collect missing hashes
-            let missing_hashes: Vec<_> = hashes
-                .into_par_iter()
-                .filter(|hash| !result.contains_key(hash))
-                .collect();
+                // Collect missing hashes
+                let missing_hashes: Vec<_> = hashes
+                    .into_par_iter()
+                    .filter(|hash| !result.contains_key(hash))
+                    .collect();
+                drop(db_guard);
+                // Fetch missing transactions
+                if !missing_hashes.is_empty() {
+                    debug!("Fetching missing transactions: {:?}", missing_hashes);
+                    let fetched_txs = self.get_txs(missing_hashes).await?;
+                    let db_guard = db.read();
+                    let cached_txs = cache_transactions(&*db_guard, fetched_txs)?;
+                    drop(db_guard);
+                    result.extend(cached_txs);
+                }
 
-            // Fetch missing transactions
-            if !missing_hashes.is_empty() {
-                debug!("Fetching missing transactions: {:?}", missing_hashes);
-                let fetched_txs = self.get_txs(missing_hashes).await?;
-                let cached_txs = cache_transactions(db, fetched_txs)?;
-                result.extend(cached_txs);
+                debug!("Got transactions: {:?}", result);
+                Ok(result)
             }
-
-            debug!("Got transactions: {:?}", result);
-            Ok(result)
-        }
-
-        #[cfg(not(feature = "cache"))]
-        {
+        } else {
             let txs = self.get_txs(hashes).await?;
 
             let mut result = HashMap::new();
@@ -349,15 +361,32 @@ where
         Params: jsonrpsee::core::traits::ToRpcParams + Send + Clone,
         R: jsonrpsee::core::DeserializeOwned,
     {
-        let res = retry!(
-            self.client
-                .request::<R, Params>(method, params.clone())
-                .await,
-            self.max_retries,
-            self.retry_interval
-        )?;
+        let mut current_retries = 0;
+        let mut client = self.client();
+        let mut first = true;
+        loop {
+            let result = client.request::<R, Params>(method, params.clone()).await;
 
-        Ok(res)
+            match result {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    current_retries += 1;
+                    if current_retries > self.max_retries {
+                        if first {
+                            let idx = self.sort_clients_by_speed().await;
+                            client = self.get_client(idx);
+
+                            warn!("Failed after {} retries with current client, switching to fastest client {}", self.max_retries, idx);
+                            current_retries = 0;
+                            first = false;
+                        } else {
+                            return Err(Error::JsonRpcClient(err));
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(self.retry_interval)).await;
+                }
+            }
+        }
     }
 
     #[inline]
@@ -374,34 +403,50 @@ where
             return Ok(Vec::new());
         }
 
-        let mut batch_request = BatchRequestBuilder::new();
+        let mut current_retries = 0;
+        let mut client = self.client();
+        let mut first = true;
 
-        for item in batchs.iter() {
-            handle_item(item, &mut batch_request)?;
+        loop {
+            let mut batch_request = BatchRequestBuilder::new();
+            for item in batchs.iter() {
+                handle_item(item, &mut batch_request)?;
+            }
+
+            match client.batch_request(batch_request.clone()).await {
+                Ok(response) => {
+                    let results = response
+                        .into_iter()
+                        .map(|res| {
+                            res.map_err(|err| Error::FailedFetch {
+                                code: err.code(),
+                                message: err.message().into(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    return Ok(results);
+                }
+                Err(err) => {
+                    current_retries += 1;
+                    if current_retries > self.max_retries {
+                        if first {
+                            let idx = self.sort_clients_by_speed().await;
+                            client = self.get_client(idx);
+                            warn!("Failed after {} retries with current client, switching to fastest client {}", self.max_retries, idx);
+                            current_retries = 0;
+                            first = false;
+                        } else {
+                            return Err(Error::JsonRpcClient(err));
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(self.retry_interval)).await;
+                }
+            }
         }
-
-        let results: BatchResponse<'_, R> = retry!(
-            self.client.batch_request(batch_request.clone()).await,
-            self.max_retries,
-            self.retry_interval
-        )?;
-
-        let results = results
-            .into_iter()
-            .map(|res| {
-                res.map_err(|err| Error::FailedFetch {
-                    code: err.code(),
-                    message: err.message().into(),
-                })
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        Ok(results)
     }
 
     pub async fn get_outputs_ignore_not_found(
         &self,
-        #[cfg(feature = "cache")] db: &redb::Database,
         inputs: Vec<CellInput>,
     ) -> Result<Vec<CellOutput>, Error> {
         debug!("Getting outputs for inputs: {:?}", inputs);
@@ -413,13 +458,7 @@ where
             .collect::<Vec<_>>();
 
         debug!("Getting transactions by hashes: {:?}", hashs);
-        let txs = self
-            .get_txs_by_hashes(
-                #[cfg(feature = "cache")]
-                db,
-                hashs,
-            )
-            .await?;
+        let txs = self.get_txs_by_hashes(hashs).await?;
 
         let res = inputs
             .into_par_iter()
@@ -437,11 +476,7 @@ where
         Ok(res)
     }
 
-    pub async fn get_outputs(
-        &self,
-        #[cfg(feature = "cache")] db: &redb::Database,
-        inputs: Vec<CellInput>,
-    ) -> Result<Vec<CellOutput>, Error> {
+    pub async fn get_outputs(&self, inputs: Vec<CellInput>) -> Result<Vec<CellOutput>, Error> {
         debug!("Getting outputs for inputs: {:?}", inputs);
         let hashs = inputs
             .par_iter()
@@ -451,13 +486,7 @@ where
             .collect::<Vec<_>>();
 
         debug!("Getting transactions by hashes: {:?}", hashs);
-        let txs = self
-            .get_txs_by_hashes(
-                #[cfg(feature = "cache")]
-                db,
-                hashs,
-            )
-            .await?;
+        let txs = self.get_txs_by_hashes(hashs).await?;
 
         let res = inputs
             .into_par_iter()
@@ -481,7 +510,6 @@ where
 
     pub async fn get_outputs_with_data(
         &self,
-        #[cfg(feature = "cache")] db: &redb::Database,
         inputs: Vec<CellInput>,
     ) -> Result<Vec<(OutPoint, CellOutput, JsonBytes)>, Error> {
         debug!("Getting outputs with data for inputs: {:?}", inputs);
@@ -493,13 +521,7 @@ where
             .collect::<Vec<_>>();
 
         debug!("Getting transactions by hashes: {:?}", hashs);
-        let txs = self
-            .get_txs_by_hashes(
-                #[cfg(feature = "cache")]
-                db,
-                hashs,
-            )
-            .await?;
+        let txs = self.get_txs_by_hashes(hashs).await?;
 
         let res = inputs
             .into_par_iter()
@@ -537,7 +559,6 @@ where
 
     pub async fn get_outputs_with_data_ignore_not_found(
         &self,
-        #[cfg(feature = "cache")] db: &redb::Database,
         inputs: Vec<CellInput>,
     ) -> Result<Vec<(OutPoint, CellOutput, JsonBytes)>, Error> {
         debug!("Getting outputs with data for inputs: {:?}", inputs);
@@ -548,13 +569,7 @@ where
             .into_par_iter()
             .collect::<Vec<_>>();
         debug!("Getting transactions by hashes: {:?}", hashs);
-        let txs = self
-            .get_txs_by_hashes(
-                #[cfg(feature = "cache")]
-                db,
-                hashs,
-            )
-            .await?;
+        let txs = self.get_txs_by_hashes(hashs).await?;
         let res = inputs
             .into_par_iter()
             .filter_map(|input| {
@@ -577,22 +592,36 @@ where
 pub type HttpFetcher = Fetcher<HttpClient>;
 
 impl Fetcher<HttpClient> {
-    pub fn http_client(
-        url: impl AsRef<str>,
+    pub async fn http_client(
+        urls: impl IntoIterator<Item = impl AsRef<str>>,
         retry_interval: u64,
         max_retries: usize,
         max_response_size: u32, // 默认是 10485760 即 10mb
         max_request_size: u32,
+        db: Option<redb::Database>,
     ) -> Result<Self, Error> {
-        let mut builder = HttpClientBuilder::default();
+        let mut clients = SmallVec::new();
 
-        builder = builder
-            .max_response_size(max_response_size)
-            .max_request_size(max_request_size);
+        // 创建所有客户端
+        for url in urls {
+            let builder = HttpClientBuilder::default()
+                .max_response_size(max_response_size)
+                .max_request_size(max_request_size);
+            let client = builder.build(url)?;
+            clients.push(client);
+        }
 
-        let client = builder.build(url)?;
+        let mut fetcher = Self::new(clients, retry_interval, max_retries);
 
-        Ok(Self::new(client, retry_interval, max_retries))
+        if let Some(db) = db {
+            fetcher.init_redb(db)?;
+        }
+
+        let idx = fetcher.sort_clients_by_speed().await;
+
+        info!("Selected fastest client at index {}", idx);
+
+        Ok(fetcher)
     }
 }
 
@@ -636,24 +665,31 @@ mod tests {
     use super::*;
     use ckb_jsonrpc_types::{BlockNumber, Either};
 
-    fn get_fetcher() -> Fetcher<HttpClient> {
-        Fetcher::http_client("https://ckb-rpc.unistate.io", 500, 5, 10485760, 10485760).unwrap()
+    async fn get_fetcher(db: Option<redb::Database>) -> Fetcher<HttpClient> {
+        Fetcher::http_client(
+            ["https://ckb-rpc.unistate.io"],
+            500,
+            5,
+            10485760,
+            10485760,
+            db,
+        )
+        .await
+        .unwrap()
     }
+
+    const fn check_send_and_sync<C: Send + Sync>() {}
 
     #[tokio::test]
     #[tracing_test::traced_test]
     async fn test_fetcher_methods() {
-        #[cfg(feature = "cache")]
         let database_path = "tmp.redb";
-        #[cfg(feature = "cache")]
         let database = redb::Database::create(database_path).unwrap();
 
         // 创建一个Fetcher实例
-        let fetcher = get_fetcher();
+        let mut fetcher = get_fetcher(Some(database)).await;
 
-        // 初始化redb（仅在启用缓存时需要）
-        #[cfg(feature = "cache")]
-        init_redb(&database).unwrap();
+        check_send_and_sync::<Fetcher<HttpClient>>();
 
         // 获取区块链的最新区块号
         let tip_block_number = fetcher.get_tip_block_number().await.unwrap();
@@ -711,11 +747,7 @@ mod tests {
 
         // 测试get_txs_by_hashes方法，通过交易哈希获取交易
         let txs_by_hashes = fetcher
-            .get_txs_by_hashes(
-                #[cfg(feature = "cache")]
-                &database,
-                tx_hashes_vec.clone(),
-            )
+            .get_txs_by_hashes(tx_hashes_vec.clone())
             .await
             .unwrap();
         // 断言获取的交易数量与请求的交易哈希数量一致
@@ -735,11 +767,7 @@ mod tests {
 
         // 测试get_outputs方法，获取指定单元输入的输出
         let outputs = fetcher
-            .get_outputs_ignore_not_found(
-                #[cfg(feature = "cache")]
-                &database,
-                inputs.clone(),
-            )
+            .get_outputs_ignore_not_found(inputs.clone())
             .await
             .unwrap();
         // 断言获取到的输出不为空
@@ -752,11 +780,7 @@ mod tests {
 
         // 测试get_outputs方法，获取指定单元输入的输出
         let outputs = fetcher
-            .get_outputs_ignore_not_found(
-                #[cfg(feature = "cache")]
-                &database,
-                inputs.clone(),
-            )
+            .get_outputs_ignore_not_found(inputs.clone())
             .await
             .unwrap();
         // 断言获取到的输出不为空
@@ -769,11 +793,7 @@ mod tests {
 
         // 测试get_outputs_with_data方法，获取指定单元输入的输出和数据
         let outputs_with_data = fetcher
-            .get_outputs_with_data_ignore_not_found(
-                #[cfg(feature = "cache")]
-                &database,
-                inputs.clone(),
-            )
+            .get_outputs_with_data_ignore_not_found(inputs.clone())
             .await
             .unwrap();
         // 断言获取到的输出和数据不为空
@@ -783,19 +803,19 @@ mod tests {
         );
         // 打印所有输出和数据信息
         println!("Outputs with data: {:?}", outputs_with_data);
-
-        // Test getting the maximum count（仅在启用缓存时需要）
-        #[cfg(feature = "cache")]
-        {
-            // Test clearing transactions with a specific count（仅在启用缓存时需要）
-            clear_transactions_below_count(&database, 1).unwrap();
-            let max_count_transaction = get_max_count_transaction(&database).unwrap();
-            println!(
-                "Transaction with maximum count: {:?}",
-                max_count_transaction
-            );
+        if let Some(db) = fetcher.db.take() {
+            let db = &*db.read();
+            // Test getting the maximum count（仅在启用缓存时需要）
+            {
+                // Test clearing transactions with a specific count（仅在启用缓存时需要）
+                clear_transactions_below_count(db, 1).unwrap();
+                let max_count_transaction = get_max_count_transaction(db).unwrap();
+                println!(
+                    "Transaction with maximum count: {:?}",
+                    max_count_transaction
+                );
+            }
             // Clean up by deleting the database file
-            drop(database); // Ensure the database is closed before deletion
             std::fs::remove_file(database_path).expect("Failed to delete the database file");
         }
     }

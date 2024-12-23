@@ -1,6 +1,6 @@
 [package]
 name = "unistate-ckb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
@@ -46,6 +46,8 @@ tracing-test = "0.2"
 redb = "2.2"
 bincode = "1.3"
 clap = "4.5"
+parking_lot = "0.12"
+smallvec = "1.13"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -82,9 +84,7 @@ async-scoped = { workspace = true, features = ["use-tokio"] }
 futures = { workspace = true }
 dashmap = { workspace = true, features = ["rayon"] }
 const_field_count = { workspace = true }
-fetcher = { package = "unistate-fetcher", path = "./crates/fetcher", features = [
-    "cache",
-] }
+fetcher = { package = "unistate-fetcher", path = "./crates/fetcher" }
 constants = { package = "unistate-constants", path = "./crates/constants" }
 
 [dev-dependencies]

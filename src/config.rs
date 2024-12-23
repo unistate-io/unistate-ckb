@@ -14,16 +14,25 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    pub fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+    pub async fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
         let fc = &self.unistate.featcher;
-
+        let redb = if fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb") {
+            Some(
+                fetcher::Database::create(fc.redb_path.as_path())
+                    .map_err(|e| fetcher::Error::Database(fetcher::RedbError::from(e)))?,
+            )
+        } else {
+            None
+        };
         let fetcher = fetcher::HttpFetcher::http_client(
-            &self.unistate.url,
+            &self.unistate.urls,
             fc.retry_interval,
             fc.max_retries,
             fc.max_response_size,
             fc.max_request_size,
-        )?;
+            redb,
+        )
+        .await?;
 
         Ok(fetcher)
     }
@@ -31,7 +40,7 @@ impl Config {
 
 #[derive(Debug, PartialEq, Deserialize)]
 pub(crate) struct UnistateConfig {
-    pub(crate) url: String,
+    pub(crate) urls: Vec<String>,
     #[serde(flatten, default)]
     pub(crate) optional_config: UnistateConfigOptional,
     #[serde(default)]
@@ -136,9 +145,9 @@ mod tests {
                 r#"
                     [unistate]
                     initial_height = 1000
-                    url = "testurl"
+                    urls = ["testurl"]
                     network = "Testnet"
-                    # auth = { user = "user", password = "password" } 
+                    # auth = { user = "user", password = "password" }
                     featcher.max_retries = 3
                     [pool]
                     max_connections = 11
@@ -154,7 +163,7 @@ mod tests {
                 Config {
                     database_url: "".into(),
                     unistate: UnistateConfig {
-                        url: "testurl".into(),
+                        urls: vec!["testurl".into()],
                         optional_config: UnistateConfigOptional {
                             initial_height: 1000,
                             network: NetworkType::Testnet,
