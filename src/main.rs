@@ -79,6 +79,7 @@ async fn main() -> Result<()> {
     let config = load_config()?;
     setup_logging(&config)?;
 
+    info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("config: {config:#?}");
 
     let db = setup_database(&config).await?;
