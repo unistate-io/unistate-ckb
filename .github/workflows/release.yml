@@ -1,15 +1,17 @@
+name: Release Packaging and Docker Publish
+
 on:
   release:
     types: [created]
 
-name: Release Packaging
-
 permissions:
   contents: write
+  packages: write
+  id-token: write
 
 jobs:
   release:
-    name: Release Packaging
+    name: Release Packaging and Docker Publish
     runs-on: ubuntu-latest
     env:
       PACKAGE_NAME: unistate-ckb
@@ -48,3 +50,37 @@ jobs:
           file: ${{ env.PACKAGE_NAME }}.tar.gz
           tag: ${{ github.ref_name }}
           overwrite: true
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Dockerfile
+        run: |
+          echo "FROM ubuntu:latest" > Dockerfile
+          echo "RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*" >> Dockerfile
+          echo "COPY ${{ env.PACKAGE_NAME }}.tar.gz /app/" >> Dockerfile
+          echo "WORKDIR /app" >> Dockerfile
+          echo "RUN tar xzf ${{ env.PACKAGE_NAME }}.tar.gz" >> Dockerfile
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
+            type=semver,pattern={{major}},value=${{ github.ref_name }}
+            type=ref,event=release
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
