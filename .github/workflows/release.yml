@@ -78,7 +78,6 @@ jobs:
           tags: |
             type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }}
             type=semver,pattern={{major}},value=${{ github.ref_name }}
-            type=ref,event=release
 
       - name: Build and push Docker image
         id: push
