@@ -15,7 +15,7 @@ use ckb_jsonrpc_types::{
 use ckb_sdk::rpc::ResponseFormatGetter;
 use ckb_types::H256;
 use jsonrpsee::{
-    core::{client::ClientT, params::BatchRequestBuilder},
+    core::params::BatchRequestBuilder,
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
@@ -28,6 +28,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use wrapper::Bincode;
 
+pub use jsonrpsee::core::client::ClientT;
 pub use redb::{Database, Error as RedbError};
 
 const TX_TABLE: TableDefinition<Bincode<H256>, Bincode<Transaction>> =

@@ -1,26 +1,18 @@
-use async_scoped::spawner::use_tokio::Tokio;
-use clap::Parser;
+use celldep_height_finder::fetch_and_print_dep_heights;
+use ckb_sdk::NetworkType;
+use clap::{Parser, Subcommand};
+use config::Config;
+use constants::Constants;
 use core::time::Duration;
 
-use ckb_jsonrpc_types::{BlockNumber, TransactionView};
-
-use ckb_sdk::NetworkType;
-use config::Config;
-use database::{DatabaseProcessor, Operations};
 use figment::{
     providers::{Format as _, Toml},
     Figment,
 };
-use futures::{Future, StreamExt, TryStreamExt};
-use rayon::iter::{IntoParallelIterator, ParallelExtend, ParallelIterator};
+
 use sea_orm::{ConnectOptions, Database, DbConn, EntityTrait};
 
-use spore::SporeTx;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-    time,
-};
+use tokio::time;
 use tracing::{error, info};
 use tracing_subscriber::{
     filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
@@ -35,67 +27,54 @@ mod entity;
 #[allow(clippy::all)]
 mod schemas;
 
+mod categorization;
 mod config;
 mod database;
 mod error;
+mod index;
 mod inscription;
 mod rgbpp;
 mod spore;
 mod unique;
 mod xudt;
 
-struct CategorizedTxs {
-    spore_txs: Vec<SporeTx>,
-    xudt_txs: Vec<TransactionView>,
-    rgbpp_txs: Vec<TransactionView>,
-    inscription_txs: Vec<TransactionView>,
-}
-
-impl CategorizedTxs {
-    fn new() -> Self {
-        Self {
-            spore_txs: Vec::new(),
-            xudt_txs: Vec::new(),
-            rgbpp_txs: Vec::new(),
-            inscription_txs: Vec::new(),
-        }
-    }
-
-    fn merge(mut self, other: Self) -> Self {
-        self.rgbpp_txs.par_extend(other.rgbpp_txs.into_par_iter());
-        self.spore_txs.par_extend(other.spore_txs.into_par_iter());
-        self.xudt_txs.par_extend(other.xudt_txs.into_par_iter());
-        self.inscription_txs
-            .par_extend(other.inscription_txs.into_par_iter());
-        self
-    }
-}
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let apply_init_height = parse_args()?;
+    let cli = Cli::parse();
 
-    setup_environment()?;
+    dotenvy::dotenv()?;
     let config = load_config()?;
-    setup_logging(&config)?;
 
-    info!("Version: {}", env!("CARGO_PKG_VERSION"));
-    info!("config: {config:#?}");
+    match &cli.command {
+        Commands::Run { apply_init_height } => {
+            setup_logging(&config)?;
 
-    let db = setup_database(&config).await?;
-    let client = config.http_fetcher().await?;
+            info!("Version: {}", env!("CARGO_PKG_VERSION"));
+            info!("config: {config:#?}");
 
-    let (initial_height, network, constants) =
-        initialize_blockchain_data(&db, &config, apply_init_height).await?;
+            let db = setup_database(&config).await?;
+            let client = config.http_fetcher().await?;
 
-    let mut indexer = Indexer::new(initial_height, &config, client, network, constants, db);
+            let (initial_height, network, constants) =
+                initialize_blockchain_data(&db, &config, *apply_init_height).await?;
 
-    run_with_watchdog(&mut indexer).await?;
+            let mut indexer =
+                index::Indexer::new(initial_height, &config, client, network, constants, db);
+
+            run_with_watchdog(&mut indexer).await?;
+        }
+        Commands::FetchDepHeights => {
+            let client = config.http_fetcher().await?;
+            let constants = Constants::from_config(config.unistate.optional_config.network);
+
+            fetch_and_print_dep_heights(constants, &client).await?;
+        }
+    }
 
     Ok(())
 }
 
-async fn run_with_watchdog(indexer: &mut Indexer) -> Result<()> {
+async fn run_with_watchdog(indexer: &mut index::Indexer) -> Result<()> {
     let mut last_error: Option<anyhow::Error> = None;
     let mut last_failure_time: Option<time::Instant> = None;
 
@@ -131,19 +110,22 @@ async fn run_with_watchdog(indexer: &mut Indexer) -> Result<()> {
 #[derive(Parser)]
 #[command(name = "unistate-ckb", about = "Unistate CKB Indexer", long_about = None, version)]
 struct Cli {
-    /// Apply initial height (true/false)
-    #[arg(short, long, value_parser)]
-    apply_init_height: Option<bool>,
+    #[command(subcommand)]
+    command: Commands,
 }
 
-fn parse_args() -> Result<Option<bool>> {
-    let cli = Cli::parse();
-    Ok(cli.apply_init_height)
-}
-
-fn setup_environment() -> Result<()> {
-    dotenvy::dotenv()?;
-    Ok(())
+#[derive(Subcommand)]
+enum Commands {
+    /// Run the indexer
+    #[command(name = "run")]
+    Run {
+        /// Apply initial height (true/false)
+        #[arg(short, long, value_parser)]
+        apply_init_height: Option<bool>,
+    },
+    /// Fetch and print dependency heights
+    #[command(name = "fetch-dep-heights")]
+    FetchDepHeights,
 }
 
 fn load_config() -> Result<Config> {
@@ -206,7 +188,7 @@ async fn initialize_blockchain_data(
     db: &DbConn,
     config: &Config,
     apply_init_height: Option<bool>,
-) -> Result<(u64, NetworkType, constants::Constants)> {
+) -> Result<(u64, NetworkType, Constants)> {
     let mut initial_height = config.unistate.optional_config.initial_height;
     let apply_init_height =
         apply_init_height.unwrap_or(config.unistate.optional_config.apply_initial_height);
@@ -218,255 +200,7 @@ async fn initialize_blockchain_data(
     }
 
     let network = config.unistate.optional_config.network;
-    let constants = constants::Constants::from_config(network);
+    let constants = Constants::from_config(network);
 
     Ok((initial_height, network, constants))
 }
-
-struct Indexer {
-    height: u64,
-    target_height: u64,
-    batch_size: u64,
-    max_batch_size: u64,
-    interval: f32,
-    fetch_size: usize,
-    client: fetcher::HttpFetcher,
-    db: DbConn,
-    constants: constants::Constants,
-    network: NetworkType,
-}
-
-impl Indexer {
-    fn new(
-        initial_height: u64,
-        config: &Config,
-        client: fetcher::HttpFetcher,
-        network: NetworkType,
-        constants: constants::Constants,
-        db: DbConn,
-    ) -> Self {
-        let max_batch_size = config.unistate.optional_config.batch_size;
-        let interval = config.unistate.optional_config.interval;
-        let fetch_size = config.unistate.optional_config.fetch_size;
-        Self {
-            height: initial_height,
-            target_height: 0,
-            batch_size: 0,
-            max_batch_size,
-            interval,
-            fetch_size,
-            client,
-            db,
-            constants,
-            network,
-        }
-    }
-
-    async fn run(&mut self) -> Result<()> {
-        self.update_target_height().await?;
-
-        let mut pre_handle = None;
-        let mut scope = unsafe { async_scoped::TokioScope::create(Tokio) };
-        loop {
-            self.log_progress();
-            let numbers = self.get_block_numbers();
-            self.update_height();
-
-            let (database_processor, op_sender, commited) =
-                DatabaseProcessor::new(self.db.clone(), self.height);
-            let processor_handle = tokio::spawn(database_processor.handle());
-
-            let handle = self.spawn_indexing_task(numbers, op_sender, commited, pre_handle.take());
-            scope.spawn(handle);
-            pre_handle = Some(processor_handle);
-
-            while let Ok(Some(res)) = scope.try_next().await {
-                res?;
-            }
-
-            if scope.remaining() >= self.fetch_size {
-                if let Some(res) = scope.next().await {
-                    res??;
-                }
-            }
-
-            if self.batch_size == 0 {
-                time::sleep(Duration::from_secs(6)).await;
-                self.update_target_height().await?;
-            }
-
-            time::sleep(Duration::from_secs_f32(self.interval)).await;
-        }
-    }
-
-    fn log_progress(&self) {
-        info!(
-            "Fetching batch: {} items | Progress: {}/{}",
-            self.batch_size, self.height, self.target_height
-        );
-    }
-
-    fn get_block_numbers(&self) -> Vec<BlockNumber> {
-        (0..self.batch_size)
-            .into_par_iter()
-            .map(|i| BlockNumber::from(self.height + i))
-            .collect()
-    }
-
-    fn update_height(&mut self) {
-        self.height += self.batch_size;
-        self.batch_size = (self.target_height - self.height).min(self.max_batch_size);
-    }
-
-    async fn update_target_height(&mut self) -> Result<()> {
-        let new_target = self.client.get_tip_block_number().await?.value();
-        if new_target != self.target_height {
-            self.target_height = new_target;
-            self.batch_size = (self.target_height - self.height).min(self.max_batch_size);
-        }
-        Ok(())
-    }
-
-    fn spawn_indexing_task<'i, 'r>(
-        &'i self,
-        numbers: Vec<BlockNumber>,
-        op_sender: mpsc::UnboundedSender<Operations>,
-        commited: oneshot::Sender<()>,
-        pre_handle: Option<JoinHandle<Result<()>>>,
-    ) -> impl Future<Output = Result<()>> + use<'r> {
-        let fetcher = self.client.clone();
-        let constants = self.constants;
-        let network = self.network;
-
-        async move {
-            let categorized_txs =
-                fetch_and_categorize_transactions(&fetcher, numbers, &constants).await?;
-
-            let (spore_sender, xudt_sender, rgbpp_sender) =
-                (op_sender.clone(), op_sender.clone(), op_sender.clone());
-
-            let (mut scope, _) = unsafe {
-                async_scoped::TokioScope::scope(|scope| {
-                    scope.spawn_blocking(move || {
-                        let spore_idxer = spore::SporeIndexer::new(
-                            categorized_txs.spore_txs,
-                            network,
-                            constants,
-                            spore_sender,
-                        );
-                        spore_idxer.index()
-                    });
-                    scope.spawn_blocking(move || {
-                        let xudt_idxer =
-                            xudt::XudtIndexer::new(categorized_txs.xudt_txs, network, xudt_sender);
-                        xudt_idxer.index()
-                    });
-                    scope.spawn(async move {
-                        let rgbpp_idxer = rgbpp::RgbppIndexer::new(
-                            categorized_txs.rgbpp_txs,
-                            fetcher,
-                            rgbpp_sender,
-                        );
-                        rgbpp_idxer.index().await
-                    });
-                    scope.spawn_blocking(move || {
-                        let inscription_idxer = inscription::InscriptionInfoIndexer::new(
-                            categorized_txs.inscription_txs,
-                            network,
-                            op_sender,
-                        );
-                        inscription_idxer.index()
-                    });
-                })
-            };
-
-            while let Some(res) = scope.next().await {
-                res??;
-            }
-
-            drop(scope);
-
-            if let Some(pre) = pre_handle {
-                pre.await??;
-            }
-
-            commited
-                .send(())
-                .map_err(|_| anyhow::anyhow!("commited failed."))?;
-
-            Ok(())
-        }
-    }
-}
-
-async fn fetch_and_categorize_transactions(
-    fetcher: &fetcher::HttpFetcher,
-    numbers: Vec<BlockNumber>,
-    constants: &constants::Constants,
-) -> Result<CategorizedTxs> {
-    let categorize_txs = fetcher
-        .get_blocks(numbers)
-        .await?
-        .into_par_iter()
-        .fold(CategorizedTxs::new, |txs, block| {
-            let timestamp = block.header.inner.timestamp.value();
-            txs.merge(
-                block
-                    .transactions
-                    .into_par_iter()
-                    .fold(CategorizedTxs::new, |mut txs, tx| {
-                        let categorizes = categorize_transaction(&tx, constants);
-                        if categorizes.is_spore {
-                            txs.spore_txs.push(SporeTx {
-                                tx: tx.clone(),
-                                timestamp,
-                            });
-                        }
-                        if categorizes.is_xudt {
-                            txs.xudt_txs.push(tx.clone());
-                        }
-
-                        if categorizes.is_rgbpp {
-                            txs.rgbpp_txs.push(tx.clone());
-                        }
-
-                        if categorizes.is_inscription {
-                            txs.inscription_txs.push(tx.clone());
-                        }
-
-                        if let Some(db) = fetcher.db.clone() {
-                            let db = db.read();
-                            let _ = fetcher::cache_transaction(&*db, tx);
-                        }
-
-                        txs
-                    })
-                    .reduce(CategorizedTxs::new, CategorizedTxs::merge),
-            )
-        })
-        .reduce(CategorizedTxs::new, CategorizedTxs::merge);
-    Ok(categorize_txs)
-}
-
-macro_rules! define_categories {
-    ($($item:ident),*) => {
-        struct Categories {
-            $($item: bool),*
-        }
-
-        fn categorize_transaction(tx: &TransactionView, constants: &constants::Constants) -> Categories {
-            tx.inner.cell_deps.iter().fold(
-                Categories {
-                    $($item: false),*
-                },
-                |categories, cd| (
-                    Categories {
-                        $($item: categories.$item || constants.$item(cd)),*
-                    }
-                )
-            )
-        }
-    };
-}
-
-define_categories! { is_spore, is_xudt, is_rgbpp, is_inscription }

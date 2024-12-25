@@ -10,7 +10,8 @@ Unistate-CKB is a Rust-based project designed to index and manage various compon
 - **Cluster Handling**: Supports clusters by adding and maintaining type IDs.
 - **Database Optimization**: Utilizes advanced database upsert functions and conflict resolution strategies.
 - **Parallel Processing**: Implements parallel processing for improved performance during indexing.
-- **GitHub Actions Integration**: Automates release builds and CI/CD processes.
+- **Dependency Height Finder**: Adds a new feature to find block heights of specific cell dependencies.
+- **Subcommands**: Supports `run` and `fetch-dep-heights` subcommands for flexible usage.
 
 ## Getting Started
 
@@ -39,7 +40,7 @@ Unistate-CKB is a Rust-based project designed to index and manage various compon
 3. Run the application:
 
     ```sh
-    ./target/release/unistate-ckb --apply-init-height
+    ./target/release/unistate-ckb run --apply-init-height true
     ```
 
 ### Configuration
@@ -48,11 +49,25 @@ The configuration file `unistate.toml` should be located in the root directory o
 
 ### Usage
 
+To see the available commands and options:
+
 ```sh
-unistate-ckb --help
+./target/release/unistate-ckb --help
 ```
 
-This will display the available command-line options and their descriptions.
+#### Example Commands
+
+- **Run the indexer**:
+
+    ```sh
+    ./target/release/unistate-ckb run --apply-init-height true
+    ```
+
+- **Fetch and print dependency heights**:
+
+    ```sh
+    ./target/release/unistate-ckb fetch-dep-heights
+    ```
 
 ## Contributing
 

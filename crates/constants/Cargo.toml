@@ -10,4 +10,3 @@ ckb-sdk = { workspace = true }
 ckb-types = { workspace = true }
 hex-literal = { workspace = true }
 rayon = { workspace = true }
-

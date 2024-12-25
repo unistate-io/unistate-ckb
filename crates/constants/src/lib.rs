@@ -34,13 +34,25 @@ const fn const_default_bytes() -> JsonBytes {
     unsafe { std::mem::transmute(src) }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Version {
     V0,
     V1,
     V2,
     V3,
     V4,
+}
+
+impl ToString for Version {
+    fn to_string(&self) -> String {
+        match self {
+            Version::V0 => "V0".to_string(),
+            Version::V1 => "V1".to_string(),
+            Version::V2 => "V2".to_string(),
+            Version::V3 => "V3".to_string(),
+            Version::V4 => "V4".to_string(),
+        }
+    }
 }
 
 macro_rules! define_network_item {
