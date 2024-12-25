@@ -14,16 +14,25 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    pub async fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+    #[inline]
+    fn init_redb(&self) -> Result<Option<fetcher::Database>, crate::error::Error> {
         let fc = &self.unistate.featcher;
-        let redb = if fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb") {
-            Some(
+        if fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb") {
+            Ok(Some(
                 fetcher::Database::create(fc.redb_path.as_path())
                     .map_err(|e| fetcher::Error::Database(fetcher::RedbError::from(e)))?,
-            )
+            ))
         } else {
-            None
-        };
+            Ok(None)
+        }
+    }
+
+    #[inline]
+    async fn create_http_fetcher(
+        &self,
+        redb: Option<fetcher::Database>,
+    ) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+        let fc = &self.unistate.featcher;
         let fetcher = fetcher::HttpFetcher::http_client(
             &self.unistate.urls,
             fc.retry_interval,
@@ -33,8 +42,18 @@ impl Config {
             redb,
         )
         .await?;
-
         Ok(fetcher)
+    }
+
+    pub async fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+        let redb = self.init_redb()?;
+        self.create_http_fetcher(redb).await
+    }
+
+    pub async fn http_fetcher_without_redb(
+        &self,
+    ) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+        self.create_http_fetcher(None).await
     }
 }
 

@@ -42,7 +42,7 @@ mod xudt;
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    dotenvy::dotenv()?;
+    let _ = dotenvy::dotenv();
     let config = load_config()?;
 
     match &cli.command {
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             run_with_watchdog(&mut indexer).await?;
         }
         Commands::FetchDepHeights => {
-            let client = config.http_fetcher().await?;
+            let client = config.http_fetcher_without_redb().await?;
             let constants = Constants::from_config(config.unistate.optional_config.network);
 
             fetch_and_print_dep_heights(constants, &client).await?;
