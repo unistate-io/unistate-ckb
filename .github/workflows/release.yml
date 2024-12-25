@@ -71,7 +71,7 @@ jobs:
           echo "RUN tar xzf ${{ env.PACKAGE_NAME }}.tar.gz" >> Dockerfile
           echo "RUN mv ${{ env.PACKAGE_NAME }}/* /usr/local/bin/" >> Dockerfile
           echo "ENV PATH=\"/usr/local/bin:${PATH}\"" >> Dockerfile
-          echo "CMD [\"${{ env.PACKAGE_NAME help }}\"]" >> Dockerfile
+          echo "CMD [\"${{ env.PACKAGE_NAME }}\", \"help\"]" >> Dockerfile
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
