@@ -1,5 +1,5 @@
 [unistate]
-url = "https://ckb-rpc.unistate.io"
+urls = ["https://ckb-rpc.unistate.io"]
 initial_height = 14231253
 batch_size = 10
 interval = 1

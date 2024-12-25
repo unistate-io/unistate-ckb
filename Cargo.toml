@@ -1,6 +1,6 @@
 [package]
 name = "unistate-ckb"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
@@ -48,6 +48,7 @@ bincode = "1.3"
 clap = "4.5"
 parking_lot = "0.12"
 smallvec = "1.13"
+prettytable-rs = "0.10"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -86,6 +87,7 @@ dashmap = { workspace = true, features = ["rayon"] }
 const_field_count = { workspace = true }
 fetcher = { package = "unistate-fetcher", path = "./crates/fetcher" }
 constants = { package = "unistate-constants", path = "./crates/constants" }
+celldep_height_finder = { package = "unistate-celldep_height_finder", path = "./crates/celldep_height_finder" }
 
 [dev-dependencies]
 criterion = { workspace = true }
