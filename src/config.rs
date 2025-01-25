@@ -17,7 +17,9 @@ impl Config {
     #[inline]
     fn init_redb(&self) -> Result<Option<fetcher::Database>, crate::error::Error> {
         let fc = &self.unistate.featcher;
-        if fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb") {
+        if !fc.disable_cached
+            && fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb")
+        {
             Ok(Some(
                 fetcher::Database::create(fc.redb_path.as_path())
                     .map_err(|e| fetcher::Error::Database(fetcher::RedbError::from(e)))?,
@@ -74,6 +76,7 @@ pub(crate) struct FeatcherConfig {
     pub(crate) max_response_size: u32, // 默认是 10485760 即 10mb
     pub(crate) max_request_size: u32,
     pub(crate) redb_path: PathBuf,
+    pub(crate) disable_cached: bool,
 }
 
 impl Default for FeatcherConfig {
@@ -84,6 +87,7 @@ impl Default for FeatcherConfig {
             max_request_size: 100 * MB,
             max_response_size: 100 * MB,
             redb_path: PathBuf::from("unistate.redb"),
+            disable_cached: true,
         }
     }
 }
