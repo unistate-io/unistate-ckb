@@ -1,7 +1,7 @@
 use ckb_jsonrpc_types::CellDep;
 use constants::{Constants, Version};
 use fetcher::{ClientT, Fetcher};
-use prettytable::{row, Table};
+use prettytable::{Table, row};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -16,25 +16,19 @@ pub enum Error {
     TransactionNotFound,
 }
 
-pub trait CellDepHeightFinder<C: ClientT> {
-    fn find_cell_dep_block_height(
-        &self,
-        fetcher: &Fetcher<C>,
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
-}
-
-impl<C: ClientT + Send + Sync> CellDepHeightFinder<C> for CellDep {
-    async fn find_cell_dep_block_height(&self, fetcher: &Fetcher<C>) -> Result<u64, Error> {
-        let tx_hash = self.out_point.tx_hash.clone();
-        let txs = fetcher.get_txs(vec![tx_hash]).await?;
-        let tx = txs.get(0).ok_or(Error::TransactionNotFound)?;
-        let block_height = tx
-            .tx_status
-            .block_number
-            .ok_or(Error::BlockHeightNotFound)?
-            .value();
-        Ok(block_height)
-    }
+pub async fn find_cell_dep_block_height<C: ClientT + Send + Sync>(
+    cell_dep: &CellDep,
+    fetcher: &Fetcher<C>,
+) -> Result<u64, Error> {
+    let tx_hash = cell_dep.out_point.tx_hash.clone();
+    let txs = fetcher.get_txs(vec![tx_hash]).await?;
+    let tx = txs.get(0).ok_or(Error::TransactionNotFound)?;
+    let block_height = tx
+        .tx_status
+        .block_number
+        .ok_or(Error::BlockHeightNotFound)?
+        .value();
+    Ok(block_height)
 }
 
 // Define a structure to hold dependency information with category and version
@@ -120,7 +114,7 @@ pub async fn fetch_and_print_dep_heights<C: ClientT + Send + Sync>(
 
     // Fetch and add rows to the table
     for dep_info in dep_list {
-        match dep_info.dep.find_cell_dep_block_height(fetcher).await {
+        match find_cell_dep_block_height(&dep_info.dep, fetcher).await {
             Ok(height) => {
                 table.add_row(row![
                     dep_info.category,

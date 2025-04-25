@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use ckb_sdk::NetworkType;
 use constants::MB;
+use fetcher::init_db;
 use serde::Deserialize;
+use utils::network::NetworkType;
 
 #[derive(Debug, PartialEq, Deserialize)]
 pub(crate) struct Config {
@@ -15,25 +16,22 @@ pub(crate) struct Config {
 
 impl Config {
     #[inline]
-    fn init_redb(&self) -> Result<Option<fetcher::Database>, crate::error::Error> {
+    fn init_redb(&self) -> Result<(), crate::error::Error> {
         let fc = &self.unistate.featcher;
         if !fc.disable_cached
             && fc.redb_path.extension().and_then(|ext| ext.to_str()) == Some("redb")
         {
-            Ok(Some(
-                fetcher::Database::create(fc.redb_path.as_path())
-                    .map_err(|e| fetcher::Error::Database(fetcher::RedbError::from(e)))?,
-            ))
+            let db = fetcher::Database::create(fc.redb_path.as_path())
+                .map_err(|e| fetcher::Error::Database(fetcher::RedbError::from(e)))?;
+            init_db(db)?;
+            Ok(())
         } else {
-            Ok(None)
+            Ok(())
         }
     }
 
     #[inline]
-    async fn create_http_fetcher(
-        &self,
-        redb: Option<fetcher::Database>,
-    ) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+    async fn create_http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
         let fc = &self.unistate.featcher;
         let fetcher = fetcher::HttpFetcher::http_client(
             &self.unistate.urls,
@@ -41,21 +39,20 @@ impl Config {
             fc.max_retries,
             fc.max_response_size,
             fc.max_request_size,
-            redb,
         )
         .await?;
         Ok(fetcher)
     }
 
     pub async fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
-        let redb = self.init_redb()?;
-        self.create_http_fetcher(redb).await
+        self.init_redb()?;
+        self.create_http_fetcher().await
     }
 
     pub async fn http_fetcher_without_redb(
         &self,
     ) -> Result<fetcher::HttpFetcher, crate::error::Error> {
-        self.create_http_fetcher(None).await
+        self.create_http_fetcher().await
     }
 }
 
@@ -154,8 +151,8 @@ pub(crate) struct PoolConfig {
 #[cfg(test)]
 mod tests {
     use figment::{
-        providers::{Format as _, Toml},
         Figment,
+        providers::{Format as _, Toml},
     };
 
     use super::*;

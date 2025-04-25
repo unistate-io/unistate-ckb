@@ -1,11 +1,10 @@
 [package]
 name = "unistate-fetcher"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 ckb-jsonrpc-types = { workspace = true }
-ckb-sdk = { workspace = true }
 ckb-types = { workspace = true }
 jsonrpsee = { workspace = true, features = ["client", "macros"] }
 rayon = { workspace = true }
@@ -15,12 +14,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = [] }
 tracing = { workspace = true }
 redb = { workspace = true }
-bincode = { workspace = true }
-parking_lot = { workspace = true, features = [
-    "hardware-lock-elision",
-    "send_guard",
-] }
+bincode = { workspace = true, features = ["serde"] }
+parking_lot = { workspace = true, features = ["hardware-lock-elision", "send_guard"] }
 smallvec = { workspace = true }
+utils = { package = "unistate-utils", path = "../utils" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

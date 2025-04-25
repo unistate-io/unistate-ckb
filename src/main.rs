@@ -1,13 +1,13 @@
 use celldep_height_finder::fetch_and_print_dep_heights;
-use ckb_sdk::NetworkType;
 use clap::{Parser, Subcommand};
 use config::Config;
 use constants::Constants;
 use core::time::Duration;
+use utils::network::NetworkType;
 
 use figment::{
-    providers::{Format as _, Toml},
     Figment,
+    providers::{Format as _, Toml},
 };
 
 use sea_orm::{ConnectOptions, Database, DbConn, EntityTrait};
@@ -15,7 +15,7 @@ use sea_orm::{ConnectOptions, Database, DbConn, EntityTrait};
 use tokio::time;
 use tracing::{error, info};
 use tracing_subscriber::{
-    filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _, Layer as _,
+    Layer as _, filter::FilterFn, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 use anyhow::Result;

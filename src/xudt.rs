@@ -1,9 +1,18 @@
 use std::collections::HashMap;
 
+use crate::{
+    database::Operations,
+    entity::{token_info, transaction_outputs_status, xudt_cell},
+    schemas::{
+        action, blockchain,
+        xudt_rce::{self, ScriptVec, XudtData},
+    },
+    unique::{TokenInfo, decode_token_info_bytes},
+};
 use bigdecimal::num_bigint::BigInt;
 use ckb_jsonrpc_types::{CellOutput, JsonBytes, TransactionView};
-use ckb_sdk::{util::blake160, NetworkType};
 use ckb_types::{H160, H256};
+use constants::Constants;
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
@@ -12,20 +21,11 @@ use rayon::{
     iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
     prelude::IntoParallelRefIterator,
 };
-use sea_orm::{prelude::BigDecimal, Set};
+use sea_orm::{Set, prelude::BigDecimal};
 use tokio::sync::mpsc::{self};
 use tracing::debug;
-
-use crate::{
-    database::Operations,
-    entity::{token_info, transaction_outputs_status, xudt_cell},
-    schemas::{
-        action, blockchain,
-        xudt_rce::{self, ScriptVec, XudtData},
-    },
-    unique::{decode_token_info_bytes, TokenInfo},
-};
-use constants::Constants;
+use utils::blake160;
+use utils::network::NetworkType;
 
 fn process_witnesses<const IS_INPUT: bool>(
     tx: &TransactionView,
@@ -76,7 +76,7 @@ struct Xudt {
 
 fn upsert_xudt(
     xudt: Xudt,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     tx_hash: H256,
     index: usize,
     op_sender: mpsc::UnboundedSender<Operations>,
@@ -473,7 +473,7 @@ mod tests {
         debug!("is xudt: {is_xudt}");
 
         let (sender, mut recver) = mpsc::unbounded_channel();
-        index_xudt(tx, ckb_sdk::NetworkType::Mainnet, constants, sender).unwrap();
+        index_xudt(tx, utils::network::NetworkType::Mainnet, constants, sender).unwrap();
         while let Some(op) = recver.blocking_recv() {
             debug!("op: {op:?}");
         }

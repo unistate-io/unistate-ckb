@@ -1,14 +1,15 @@
-use bigdecimal::{num_bigint::BigInt, BigDecimal};
+use bigdecimal::{BigDecimal, num_bigint::BigInt};
 use ckb_jsonrpc_types::{Script, TransactionView};
-use ckb_sdk::NetworkType;
 use ckb_types::prelude::{Builder as _, Entity as _};
-use ckb_types::{packed, H256};
+use ckb_types::{H256, packed};
+use molecule::prelude::Entity as _;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator as _};
 use sea_orm::Set;
 use std::convert::TryInto;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::debug;
+use utils::network::NetworkType;
 
 use crate::{database::Operations, entity::token_info, schemas::action, spore::upsert_address};
 
@@ -266,7 +267,6 @@ fn generate_args(script: &packed::Script) -> packed::Bytes {
 #[cfg(test)]
 mod tests {
     use hex::encode;
-    use molecule::prelude::Entity as _;
     use serde_json::json;
 
     use super::*;

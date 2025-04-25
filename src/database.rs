@@ -1,6 +1,6 @@
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use sea_orm::{
-    sea_query::OnConflict, ActiveModelTrait, DbConn, DbErr, EntityTrait as _, TransactionTrait,
+    ActiveModelTrait, DbConn, DbErr, EntityTrait as _, TransactionTrait, sea_query::OnConflict,
 };
 use tokio::sync::{mpsc, oneshot};
 

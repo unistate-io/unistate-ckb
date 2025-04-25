@@ -1,6 +1,9 @@
 use ckb_jsonrpc_types::TransactionView;
-use ckb_types::{packed, H256};
-use molecule::{bytes::Buf, prelude::Reader as _};
+use ckb_types::{H256, packed};
+use molecule::{
+    bytes::Buf,
+    prelude::{Entity as _, Reader as _},
+};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator as _, IntoParallelRefIterator, ParallelIterator,
 };
@@ -26,7 +29,7 @@ pub struct SporeTx {
 
 pub struct SporeIndexer {
     txs: Vec<SporeTx>,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 }
@@ -34,7 +37,7 @@ pub struct SporeIndexer {
 impl SporeIndexer {
     pub fn new(
         txs: Vec<SporeTx>,
-        network: ckb_sdk::NetworkType,
+        network: utils::network::NetworkType,
         constants: Constants,
         op_sender: mpsc::UnboundedSender<Operations>,
     ) -> Self {
@@ -78,7 +81,7 @@ struct Data {
 fn index_spore(
     tx: TransactionView,
     timestamp: u64,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
     constants: Constants,
 ) -> anyhow::Result<()> {
@@ -220,13 +223,14 @@ impl action::SporeActionUnion {
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn from_address_id(&self, network: ckb_sdk::NetworkType) -> Option<String> {
+    fn from_address_id(&self, network: utils::network::NetworkType) -> Option<String> {
         self.from_address()
-            .map(|address| address.to_string(network))
+            .and_then(|address| address.to_string(network))
     }
 
-    fn to_address_id(&self, network: ckb_sdk::NetworkType) -> Option<String> {
-        self.to_address().map(|address| address.to_string(network))
+    fn to_address_id(&self, network: utils::network::NetworkType) -> Option<String> {
+        self.to_address()
+            .and_then(|address| address.to_string(network))
     }
 
     #[allow(clippy::wrong_self_convention)]
@@ -286,11 +290,16 @@ impl action::AddressUnion {
             packed::Script::from(script).as_bytes(),
         ))
     }
-    fn to_string(&self, network: ckb_sdk::NetworkType) -> String {
-        use ckb_types::prelude::Entity as _;
-        let script = ckb_gen_types::packed::Script::new_unchecked(self.script().as_bytes());
-        let addr = ckb_sdk::AddressPayload::from(script);
-        addr.display_with_network(network, true)
+
+    fn to_string(&self, network: utils::network::NetworkType) -> Option<String> {
+        let script_bytes = self.script().as_bytes();
+        match utils::address::script_bytes_to_address(script_bytes.as_ref(), network) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                error!("Failed to convert address: {:?}", e);
+                None
+            }
+        }
     }
 
     fn script(&self) -> &action::Script {
@@ -364,10 +373,16 @@ fn to_timestamp(timestamp: u64) -> chrono::NaiveDateTime {
 
 pub fn upsert_address(
     address: &action::AddressUnion,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<String> {
-    let address_id = address.to_string(network);
+    let Some(address_id) = address.to_string(network) else {
+        return Err(anyhow::anyhow!(
+            "Failed to convert script to address string. Script bytes: {:?}, Network: {:?}",
+            address.script().as_bytes(),
+            network
+        ));
+    };
 
     let script = address.script();
     // Insert address
@@ -385,7 +400,7 @@ pub fn upsert_address(
 
 fn upsert_spores(
     data: Data,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
@@ -455,7 +470,7 @@ fn upsert_spores(
 fn insert_action(
     action: action::SporeActionUnion,
     tx: H256,
-    network: ckb_sdk::NetworkType,
+    network: utils::network::NetworkType,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
@@ -534,7 +549,7 @@ mod tests {
         index_spore(
             tx,
             0,
-            ckb_sdk::NetworkType::Testnet,
+            utils::network::NetworkType::Testnet,
             sender,
             Constants::Testnet,
         )

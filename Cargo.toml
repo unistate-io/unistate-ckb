@@ -1,11 +1,10 @@
 [package]
 name = "unistate-ckb"
-version = "0.2.1"
-edition = "2021"
+version = "0.3.0"
+edition = "2024"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/unistate-io/unistate-ckb"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
@@ -15,12 +14,11 @@ members = ["crates/*"]
 anyhow = "1.0"
 async-scoped = "0.9"
 bigdecimal = "0.4"
-ckb-fixed-hash-core = "0.119"
-ckb-gen-types = "0.119"
-ckb-hash = "0.119"
-ckb-jsonrpc-types = "0.119"
-ckb-sdk = { version = "3.5", git = "https://github.com/nervosnetwork/ckb-sdk-rust.git", rev = "b2aafcc6d52fbfb2d005067b0f9755d427477d2f" }
-ckb-types = "0.119"
+ckb-fixed-hash-core = "0.201"
+ckb-gen-types = "0.201"
+ckb-hash = "0.201"
+ckb-jsonrpc-types = "0.201"
+ckb-types = "0.201"
 chrono = "0.4"
 criterion = "0.5"
 const_field_count = "0.1"
@@ -29,26 +27,27 @@ dotenvy = "0.15"
 figment = "0.10"
 futures = "0.3"
 hex = "0.4.3"
-hex-literal = "0.4"
-jsonrpsee = "0.24"
-molecule = "0.8.0"
-rand = "0.8.5"
+hex-literal = "1.0"
+jsonrpsee = "0.25"
+molecule = "0.9"
+rand = "0.9.1"
 rayon = "1.0"
-sea-orm = "1.1"
+sea-orm = { version = "1.1", default-features = false }
 serde = "1.0"
 serde_json = "1.0"
 sha3 = "0.10"
 thiserror = "2.0"
-tokio = "1.41"
+tokio = { version = "1.44", default-features = false }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
-redb = "2.2"
-bincode = "1.3"
+redb = "2.5"
+bincode = "2.0"
 clap = "4.5"
 parking_lot = "0.12"
-smallvec = "1.13"
-prettytable-rs = "0.10"
+smallvec = "1.15"
+prettytable-rs = { version = "0.10", default-features = false }
+bech32 = "0.11"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -56,19 +55,12 @@ anyhow = { workspace = true }
 ckb-fixed-hash-core = { workspace = true }
 ckb-gen-types = { workspace = true }
 ckb-jsonrpc-types = { workspace = true }
-ckb-sdk = { workspace = true }
 ckb-types = { workspace = true }
 ckb-hash = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
 molecule = { workspace = true }
-sea-orm = { workspace = true, features = [
-    "sqlx-postgres",
-    "runtime-tokio-rustls",
-    "macros",
-    "with-chrono",
-    "with-bigdecimal",
-], default-features = false }
+sea-orm = { workspace = true, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-bigdecimal"] }
 bigdecimal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 chrono = { workspace = true, features = ["serde"] }
@@ -88,15 +80,13 @@ const_field_count = { workspace = true }
 fetcher = { package = "unistate-fetcher", path = "./crates/fetcher" }
 constants = { package = "unistate-constants", path = "./crates/constants" }
 celldep_height_finder = { package = "unistate-celldep_height_finder", path = "./crates/celldep_height_finder" }
+utils = { package = "unistate-utils", path = "./crates/utils" }
 
 [dev-dependencies]
 criterion = { workspace = true }
 rand = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 
-[[bench]]
-name = "categorize"
-harness = false
 
 [profile.release]
 debug = "limited"

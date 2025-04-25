@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Error};
+use anyhow::{Error, anyhow, bail};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct TokenInfo {

@@ -1,5 +1,5 @@
 use redb::{Key, Value};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::any::type_name;
 use std::cmp::Ordering;
 use std::fmt::Debug;
@@ -29,7 +29,9 @@ where
     where
         Self: 'a,
     {
-        bincode::deserialize(data).unwrap()
+        bincode::serde::decode_from_slice(data, bincode::config::standard())
+            .unwrap()
+            .0
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -37,7 +39,7 @@ where
         Self: 'a,
         Self: 'b,
     {
-        bincode::serialize(value).unwrap()
+        bincode::serde::encode_to_vec(value, bincode::config::standard()).unwrap()
     }
 
     fn type_name() -> redb::TypeName {

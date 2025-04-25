@@ -1,9 +1,9 @@
 use ckb_fixed_hash_core::H256;
 use ckb_jsonrpc_types::{CellDep, DepType, JsonBytes, OutPoint, Script, ScriptHashType, Uint32};
-use ckb_sdk::NetworkType;
 use ckb_types::bytes::Bytes;
 use hex_literal::hex;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use utils::network::NetworkType;
 
 // 常量
 pub const CKB_UNIT: u64 = 100000000;
@@ -154,7 +154,6 @@ impl Constants {
         match network {
             NetworkType::Mainnet => Self::Mainnet,
             NetworkType::Testnet => Self::Testnet,
-            _ => unimplemented!(),
         }
     }
 }
@@ -640,6 +639,25 @@ impl Constants {
         {
             (Testnet, V1) => "0231ea581bbc38965e10a2659da326ae840c038a9d0d6849f458b51d94870104",
             (Testnet, V2) => "c5a41d58155b11ecd87a5a49fdcb6e83bd6684d3b72b2f3686f081945461c156",
+        }
+    );
+
+    define_script!(
+        usdi_type_script,
+        ScriptHashType::Type,
+        {
+            Testnet => "cc9dc33ef234e14bc788c43a4848556a5fb16401a04662fc55db9bb201987037",
+            Mainnet => "bfa35a9c38a676682b65ade8f02be164d48632281477e36f8dc2f41f79e56bfc"
+        }
+    );
+
+    define_cell_dep!(
+        usdi_type_dep,
+        DepType::Code,
+        0x0,
+        {
+            Testnet => "03d029480416c2fc927dfbfe0ed1916ffaf55d1e1f3146c55cf2d3dd5e674e61",
+            Mainnet => "f6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d"
         }
     );
 }

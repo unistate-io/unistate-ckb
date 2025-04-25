@@ -1,14 +1,11 @@
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
-use futures::StreamExt;
+use futures::future::try_join_all;
 use molecule::{
     bytes::Buf,
     prelude::{Entity, Reader as _},
 };
-use rayon::{
-    iter::IntoParallelIterator as _,
-    prelude::{IntoParallelRefIterator as _, ParallelIterator as _},
-};
+use rayon::prelude::{IntoParallelRefIterator as _, ParallelIterator as _};
 use sea_orm::Set;
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -17,6 +14,24 @@ use crate::{
     database::Operations,
     schemas::{blockchain, rgbpp},
 };
+
+pub async fn run_rgbpp_indexing_logic(
+    txs: Vec<TransactionView>,
+    fetcher: fetcher::HttpFetcher,
+    op_sender: mpsc::UnboundedSender<Operations>,
+) -> Result<(), anyhow::Error> {
+    let mut tasks = Vec::new();
+    for tx in txs {
+        let fetcher = fetcher.clone();
+        let op_sender = op_sender.clone();
+        let tx_clone = tx.clone(); // Clone tx to ensure 'static lifetime
+        tasks.push(tokio::spawn(async move {
+            index_rgbpp_lock(fetcher, tx_clone, op_sender).await
+        }));
+    }
+    try_join_all(tasks).await?;
+    Ok(())
+}
 
 pub struct RgbppIndexer {
     txs: Vec<TransactionView>,
@@ -38,31 +53,7 @@ impl RgbppIndexer {
     }
 
     pub async fn index(self) -> Result<(), anyhow::Error> {
-        let Self {
-            txs,
-            fetcher,
-            op_sender,
-        } = self;
-
-        let tasks = txs
-            .into_par_iter()
-            .map(|tx| index_rgbpp_lock(fetcher.clone(), tx, op_sender.clone()))
-            .collect::<Vec<_>>()
-            .into_iter();
-
-        let (mut scope, _) = unsafe {
-            async_scoped::TokioScope::scope(|scope| {
-                for task in tasks {
-                    scope.spawn(task);
-                }
-            })
-        };
-
-        while let Some(task) = scope.next().await {
-            task??;
-        }
-
-        Ok(())
+        run_rgbpp_indexing_logic(self.txs, self.fetcher, self.op_sender).await
     }
 }
 
@@ -72,7 +63,6 @@ async fn index_rgbpp_lock(
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
-
     tx.inner
         .witnesses
         .par_iter()

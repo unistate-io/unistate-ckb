@@ -1,13 +1,13 @@
 [package]
 name = "unistate-celldep_height_finder"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 fetcher = { package = "unistate-fetcher", path = "../fetcher" }
 constants = { package = "unistate-constants", path = "../constants" }
-tokio = { workspace = true, default-features = false }
+tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 ckb-jsonrpc-types = { workspace = true }
-prettytable-rs = { workspace = true, default-features = false }
+prettytable-rs = { workspace = true }

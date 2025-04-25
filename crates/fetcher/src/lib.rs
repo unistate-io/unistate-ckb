@@ -1,27 +1,26 @@
 mod wrapper;
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
-
 use ckb_jsonrpc_types::{
     BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, OutPoint, Transaction,
     TransactionWithStatusResponse,
 };
-use ckb_sdk::rpc::ResponseFormatGetter;
 use ckb_types::H256;
 use jsonrpsee::{
     core::params::BatchRequestBuilder,
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
-use parking_lot::RwLock;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use redb::{ReadableTable as _, TableDefinition};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::{Bound, RangeBounds},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+use utils::ResponseFormatGetter;
 
 use smallvec::SmallVec;
 use thiserror::Error;
@@ -36,6 +35,8 @@ const TX_TABLE: TableDefinition<Bincode<H256>, Bincode<Transaction>> =
 
 const TX_COUNT_TABLE: TableDefinition<Bincode<H256>, u64> =
     TableDefinition::new("transaction_counts");
+
+static DB: OnceLock<Database> = OnceLock::new();
 
 /// Custom error type for the Fetcher module.
 ///
@@ -64,7 +65,9 @@ pub enum Error {
     /// Represents a situation where data for a requested previous output is not found.
     ///
     /// Contains the transaction hash, index, and the length of outputs of the missing output data.
-    #[error("Previous output data not found: tx_hash={tx_hash:#x}, index={index}, outputs_data_len={outputs_data_len}")]
+    #[error(
+        "Previous output data not found: tx_hash={tx_hash:#x}, index={index}, outputs_data_len={outputs_data_len}"
+    )]
     PreviousOutputDataNotFound {
         tx_hash: H256,
         index: u32,
@@ -88,6 +91,13 @@ pub enum Error {
     /// Wraps the underlying `redb::Error`.
     #[error("Database error: {0}")]
     Database(#[from] redb::Error),
+
+    /// Represents an error when attempting to use the database before it has been initialized.
+    ///
+    /// This error occurs when database operations are attempted but the database connection
+    /// has not been properly set up via `init_redb` method.
+    #[error("Database not initialized")]
+    DatabaseNotInitialized,
 }
 
 #[derive(Debug, Clone)]
@@ -96,7 +106,23 @@ pub struct Fetcher<C> {
     current_index: Arc<AtomicUsize>,
     retry_interval: u64,
     max_retries: usize,
-    pub db: Option<Arc<RwLock<redb::Database>>>,
+}
+
+pub fn init_db(db: Database) -> Result<(), Error> {
+    let write_txn = db.begin_write().map_err(redb::Error::from)?;
+    {
+        let _ = write_txn.open_table(TX_TABLE).map_err(redb::Error::from)?;
+        let _ = write_txn
+            .open_table(TX_COUNT_TABLE)
+            .map_err(redb::Error::from)?;
+    }
+    write_txn.commit().map_err(redb::Error::from)?;
+
+    DB.set(db).map_err(|_| Error::DatabaseNotInitialized)
+}
+
+pub fn get_db() -> Result<&'static Database, Error> {
+    DB.get().ok_or(Error::DatabaseNotInitialized)
 }
 
 mod cache {
@@ -267,7 +293,6 @@ where
             clients,
             retry_interval,
             max_retries,
-            db: None,
             current_index: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -296,43 +321,29 @@ where
         fastest_index
     }
 
-    pub fn init_redb(&mut self, db: redb::Database) -> Result<(), redb::Error> {
-        let write_txn = db.begin_write()?;
-        {
-            let _ = write_txn.open_table(TX_TABLE)?;
-            let _ = write_txn.open_table(TX_COUNT_TABLE)?;
-        }
-        write_txn.commit()?;
-
-        self.db = Some(Arc::new(RwLock::new(db)));
-
-        Ok(())
-    }
-
     pub async fn get_txs_by_hashes(
         &self,
         hashes: Vec<H256>,
     ) -> Result<HashMap<H256, Transaction>, Error> {
         debug!("Getting transactions by hashes: {:?}", hashes);
 
-        if let Some(db) = self.db.clone() {
+        if let Ok(db) = get_db() {
             {
-                let db_guard = db.read();
-                let mut result = get_cached_transactions(&*db_guard, &hashes)?;
+                let mut result = get_cached_transactions(db, &hashes)?;
 
                 // Collect missing hashes
                 let missing_hashes: Vec<_> = hashes
                     .into_par_iter()
                     .filter(|hash| !result.contains_key(hash))
                     .collect();
-                drop(db_guard);
+
                 // Fetch missing transactions
                 if !missing_hashes.is_empty() {
                     debug!("Fetching missing transactions: {:?}", missing_hashes);
                     let fetched_txs = self.get_txs(missing_hashes).await?;
-                    let db_guard = db.read();
-                    let cached_txs = cache_transactions(&*db_guard, fetched_txs)?;
-                    drop(db_guard);
+
+                    let cached_txs = cache_transactions(db, fetched_txs)?;
+
                     result.extend(cached_txs);
                 }
 
@@ -377,7 +388,10 @@ where
                             let idx = self.sort_clients_by_speed().await;
                             client = self.get_client(idx);
 
-                            warn!("Failed after {} retries with current client, switching to fastest client {}", self.max_retries, idx);
+                            warn!(
+                                "Failed after {} retries with current client, switching to fastest client {}",
+                                self.max_retries, idx
+                            );
                             current_retries = 0;
                             first = false;
                         } else {
@@ -433,7 +447,10 @@ where
                         if first {
                             let idx = self.sort_clients_by_speed().await;
                             client = self.get_client(idx);
-                            warn!("Failed after {} retries with current client, switching to fastest client {}", self.max_retries, idx);
+                            warn!(
+                                "Failed after {} retries with current client, switching to fastest client {}",
+                                self.max_retries, idx
+                            );
                             current_retries = 0;
                             first = false;
                         } else {
@@ -599,7 +616,6 @@ impl Fetcher<HttpClient> {
         max_retries: usize,
         max_response_size: u32, // 默认是 10485760 即 10mb
         max_request_size: u32,
-        db: Option<redb::Database>,
     ) -> Result<Self, Error> {
         let mut clients = SmallVec::new();
 
@@ -612,11 +628,7 @@ impl Fetcher<HttpClient> {
             clients.push(client);
         }
 
-        let mut fetcher = Self::new(clients, retry_interval, max_retries);
-
-        if let Some(db) = db {
-            fetcher.init_redb(db)?;
-        }
+        let fetcher = Self::new(clients, retry_interval, max_retries);
 
         let idx = fetcher.sort_clients_by_speed().await;
 
@@ -649,6 +661,37 @@ where
         .await
     }
 
+    pub async fn get_blocks_range<R>(&self, range: R) -> Result<Vec<BlockView>, Error>
+    where
+        R: RangeBounds<BlockNumber>,
+    {
+        // Convert range bounds to concrete block numbers
+        let start = match range.start_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => BlockNumber::from(n.value() + 1),
+            Bound::Unbounded => BlockNumber::from(0),
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(n) => *n,
+            Bound::Excluded(n) => BlockNumber::from(n.value().saturating_sub(1)),
+            Bound::Unbounded => self.get_tip_block_number().await?,
+        };
+
+        // Handle empty range cases
+        if start > end {
+            return Ok(Vec::new());
+        }
+
+        // Generate the sequence of block numbers
+        let block_numbers: Vec<BlockNumber> = (start.value()..=end.value())
+            .map(BlockNumber::from)
+            .collect();
+
+        // Fetch the blocks in batches
+        self.get_blocks(block_numbers).await
+    }
+
     pub async fn get_txs(
         &self,
         hashs: Vec<H256>,
@@ -666,17 +709,10 @@ mod tests {
     use super::*;
     use ckb_jsonrpc_types::{BlockNumber, Either};
 
-    async fn get_fetcher(db: Option<redb::Database>) -> Fetcher<HttpClient> {
-        Fetcher::http_client(
-            ["https://ckb-rpc.unistate.io"],
-            500,
-            5,
-            10485760,
-            10485760,
-            db,
-        )
-        .await
-        .unwrap()
+    async fn get_fetcher() -> Fetcher<HttpClient> {
+        Fetcher::http_client(["https://ckb-rpc.unistate.io"], 500, 5, 10485760, 10485760)
+            .await
+            .unwrap()
     }
 
     const fn check_send_and_sync<C: Send + Sync>() {}
@@ -686,9 +722,10 @@ mod tests {
     async fn test_fetcher_methods() {
         let database_path = "tmp.redb";
         let database = redb::Database::create(database_path).unwrap();
+        init_db(database);
 
         // 创建一个Fetcher实例
-        let mut fetcher = get_fetcher(Some(database)).await;
+        let mut fetcher = get_fetcher().await;
 
         check_send_and_sync::<Fetcher<HttpClient>>();
 
@@ -752,7 +789,11 @@ mod tests {
             .await
             .unwrap();
         // 断言获取的交易数量与请求的交易哈希数量一致
-        assert_eq!(txs_by_hashes.len(), tx_hashes_vec.len(), "Number of transactions retrieved by hashes does not match the number of transaction hashes");
+        assert_eq!(
+            txs_by_hashes.len(),
+            tx_hashes_vec.len(),
+            "Number of transactions retrieved by hashes does not match the number of transaction hashes"
+        );
 
         // 从交易中提取所有单元输入（cell inputs）
         let mut inputs = Vec::new();
@@ -804,8 +845,7 @@ mod tests {
         );
         // 打印所有输出和数据信息
         println!("Outputs with data: {:?}", outputs_with_data);
-        if let Some(db) = fetcher.db.take() {
-            let db = &*db.read();
+        if let Ok(db) = get_db() {
             // Test getting the maximum count（仅在启用缓存时需要）
             {
                 // Test clearing transactions with a specific count（仅在启用缓存时需要）
