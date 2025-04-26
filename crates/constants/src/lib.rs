@@ -217,6 +217,18 @@ impl Constants {
             .into_par_iter()
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
+            || self.usdi_type_dep().out_point.eq(&cd.out_point)
+    }
+
+    #[inline]
+    pub fn is_usdi(self, cd: &CellDep) -> bool {
+        self.usdi_type_dep().out_point.eq(&cd.out_point)
+    }
+
+    #[inline]
+    pub fn is_usdi_type(self, script: &Script) -> bool {
+        self.usdi_type_script().code_hash.eq(&script.code_hash)
+            && self.usdi_type_script().hash_type.eq(&script.hash_type)
     }
 
     #[inline]
@@ -254,7 +266,7 @@ impl Constants {
     }
 
     pub fn is_xudt_type(self, script: &Script) -> bool {
-        self.check_type(self.xudt_types(), script)
+        self.check_type(self.xudt_types(), script) || self.is_usdi_type(script)
     }
 
     pub fn is_spore_type(self, script: &Script) -> bool {
