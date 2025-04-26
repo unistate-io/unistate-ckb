@@ -5,6 +5,7 @@ use ckb_jsonrpc_types::{
     TransactionWithStatusResponse,
 };
 use ckb_types::H256;
+use futures::FutureExt;
 use jsonrpsee::{
     core::params::BatchRequestBuilder,
     http_client::{HttpClient, HttpClientBuilder},
@@ -12,19 +13,19 @@ use jsonrpsee::{
 };
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use redb::{ReadableTable as _, TableDefinition};
+use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     ops::{Bound, RangeBounds},
     sync::{
-        Arc, OnceLock,
+        OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
-use utils::ResponseFormatGetter;
-
-use smallvec::SmallVec;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
+use utils::ResponseFormatGetter;
 use wrapper::Bincode;
 
 pub use jsonrpsee::core::client::ClientT;
@@ -98,14 +99,51 @@ pub enum Error {
     /// has not been properly set up via `init_redb` method.
     #[error("Database not initialized")]
     DatabaseNotInitialized,
+
+    /// Represents an error when attempting to initialize the fetcher when it's already been initialized.
+    #[error("Fetcher already initialized")]
+    FetcherAlreadyInitialized,
+
+    /// Represents an error when attempting to use the fetcher before it has been initialized.
+    #[error("Fetcher not initialized")]
+    FetcherNotInitialized,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Fetcher<C> {
     clients: SmallVec<[C; 2]>,
-    current_index: Arc<AtomicUsize>,
+    current_index: AtomicUsize,
     retry_interval: u64,
     max_retries: usize,
+}
+
+static FETCHER: OnceLock<Fetcher<HttpClient>> = OnceLock::new();
+
+pub async fn init_http_fetcher(
+    urls: impl IntoIterator<Item = impl AsRef<str>>,
+    retry_interval: u64,
+    max_retries: usize,
+    max_response_size: u32,
+    max_request_size: u32,
+    sort_interval_secs: Option<u64>,
+) -> Result<(), Error> {
+    let fetcher = Fetcher::http_client(
+        urls,
+        retry_interval,
+        max_retries,
+        max_response_size,
+        max_request_size,
+        sort_interval_secs,
+    )
+    .await?;
+
+    FETCHER
+        .set(fetcher)
+        .map_err(|_| Error::FetcherAlreadyInitialized)
+}
+
+pub fn get_fetcher() -> Result<&'static Fetcher<HttpClient>, Error> {
+    FETCHER.get().ok_or(Error::FetcherNotInitialized)
 }
 
 pub fn init_db(db: Database) -> Result<(), Error> {
@@ -278,7 +316,7 @@ pub use cache::*;
 
 impl<C> Fetcher<C>
 where
-    C: ClientT,
+    C: ClientT + Send + Clone + 'static + Sync,
 {
     fn client(&self) -> &C {
         self.get_client(self.current_index.load(Ordering::Relaxed))
@@ -293,7 +331,7 @@ where
             clients,
             retry_interval,
             max_retries,
-            current_index: Arc::new(AtomicUsize::new(0)),
+            current_index: AtomicUsize::new(0),
         }
     }
 
@@ -368,99 +406,119 @@ where
     }
 
     #[inline]
-    async fn call<Params, R>(&self, method: &str, params: Params) -> Result<R, Error>
+    fn call<Params, R>(
+        &self,
+        method: &'static str,
+        params: Params,
+    ) -> impl Future<Output = Result<R, Error>> + Send + use<Params, R, C> + 'static
     where
-        Params: jsonrpsee::core::traits::ToRpcParams + Send + Clone,
-        R: jsonrpsee::core::DeserializeOwned,
+        Params: jsonrpsee::core::traits::ToRpcParams + Send + Clone + 'static,
+        R: jsonrpsee::core::DeserializeOwned + Send + 'static,
     {
         let mut current_retries = 0;
-        let mut client = self.client();
-        let mut first = true;
-        loop {
-            let result = client.request::<R, Params>(method, params.clone()).await;
+        let client = self.client().clone();
+        let max_retries = self.max_retries;
+        let retry_interval = self.retry_interval;
+        async move {
+            loop {
+                let result = client.request::<R, Params>(method, params.clone()).await;
 
-            match result {
-                Ok(response) => return Ok(response),
-                Err(err) => {
-                    current_retries += 1;
-                    if current_retries > self.max_retries {
-                        if first {
-                            let idx = self.sort_clients_by_speed().await;
-                            client = self.get_client(idx);
-
-                            warn!(
-                                "Failed after {} retries with current client, switching to fastest client {}",
-                                self.max_retries, idx
-                            );
-                            current_retries = 0;
-                            first = false;
-                        } else {
+                match result {
+                    Ok(response) => return Ok(response),
+                    Err(err) => {
+                        current_retries += 1;
+                        if current_retries > max_retries {
                             return Err(Error::JsonRpcClient(err));
                         }
+                        tokio::time::sleep(std::time::Duration::from_millis(retry_interval)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(self.retry_interval)).await;
                 }
             }
         }
     }
 
     #[inline]
-    async fn batch_request<P, R, HI>(
+    fn batch_request<R>(
         &self,
-        batchs: Vec<P>,
-        handle_item: HI,
-    ) -> Result<Vec<R>, Error>
+        batch_request: BatchRequestBuilder<'static>,
+    ) -> impl Future<Output = Result<Vec<R>, Error>> + use<R, C> + 'static + Send
     where
-        R: jsonrpsee::core::DeserializeOwned + std::fmt::Debug,
-        HI: Fn(&P, &mut BatchRequestBuilder<'_>) -> Result<(), Error>,
+        R: jsonrpsee::core::DeserializeOwned + std::fmt::Debug + Send + 'static + Sync,
     {
-        if batchs.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut current_retries = 0;
-        let mut client = self.client();
-        let mut first = true;
+        let client = self.client().clone();
+        let max_retries = self.max_retries;
+        let retry_interval = self.retry_interval;
+        async move {
+            loop {
+                // NOTE: This `.boxed()` is a workaround for a compiler bug.
+                // It may be removed in the future when the bug is fixed.
+                let result = client.batch_request(batch_request.clone()).boxed().await;
 
-        loop {
-            let mut batch_request = BatchRequestBuilder::new();
-            for item in batchs.iter() {
-                handle_item(item, &mut batch_request)?;
-            }
-
-            match client.batch_request(batch_request.clone()).await {
-                Ok(response) => {
-                    let results = response
-                        .into_iter()
-                        .map(|res| {
-                            res.map_err(|err| Error::FailedFetch {
-                                code: err.code(),
-                                message: err.message().into(),
+                match result {
+                    Ok(response) => {
+                        let results = response
+                            .into_iter()
+                            .map(|res| {
+                                res.map_err(|err| Error::FailedFetch {
+                                    code: err.code(),
+                                    message: err.message().into(),
+                                })
                             })
-                        })
-                        .collect::<Result<Vec<_>, Error>>()?;
-                    return Ok(results);
-                }
-                Err(err) => {
-                    current_retries += 1;
-                    if current_retries > self.max_retries {
-                        if first {
-                            let idx = self.sort_clients_by_speed().await;
-                            client = self.get_client(idx);
-                            warn!(
-                                "Failed after {} retries with current client, switching to fastest client {}",
-                                self.max_retries, idx
-                            );
-                            current_retries = 0;
-                            first = false;
-                        } else {
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        return Ok(results);
+                    }
+                    Err(err) => {
+                        current_retries += 1;
+                        if current_retries > max_retries {
                             return Err(Error::JsonRpcClient(err));
                         }
+
+                        tracing::warn!("Retrying batch request after error: {}", err);
+
+                        tokio::time::sleep(std::time::Duration::from_millis(retry_interval)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(self.retry_interval)).await;
                 }
             }
         }
+    }
+
+    /// Starts a background task that periodically sorts clients by speed
+    pub fn start_background_sorting(&self, interval_secs: u64) {
+        // 克隆必要的字段用于闭包
+        let clients = self.clients.clone();
+
+        // 直接 spawn 任务，不保存 JoinHandle
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+
+            loop {
+                interval.tick().await;
+
+                // 测量每个客户端的响应时间
+                let mut results = Vec::with_capacity(clients.len());
+                for (idx, client) in clients.iter().enumerate() {
+                    let start = std::time::Instant::now();
+                    let result = client
+                        .request::<BlockNumber, _>("get_tip_block_number", rpc_params!())
+                        .await;
+                    let duration = start.elapsed();
+
+                    if result.is_ok() {
+                        results.push((idx, duration));
+                    }
+                }
+
+                // 找到最快的客户端
+                if let Some((fastest_idx, _)) = results.iter().min_by_key(|(_, d)| *d) {
+                    FETCHER
+                        .wait()
+                        .current_index
+                        .store(*fastest_idx, Ordering::Relaxed);
+                    debug!("Updated fastest client to index {}", fastest_idx);
+                }
+            }
+        });
     }
 
     pub async fn get_outputs_ignore_not_found(
@@ -616,6 +674,7 @@ impl Fetcher<HttpClient> {
         max_retries: usize,
         max_response_size: u32, // 默认是 10485760 即 10mb
         max_request_size: u32,
+        sort_interval_secs: Option<u64>,
     ) -> Result<Self, Error> {
         let mut clients = SmallVec::new();
 
@@ -634,13 +693,18 @@ impl Fetcher<HttpClient> {
 
         info!("Selected fastest client at index {}", idx);
 
+        // Start background sorting if interval is specified
+        if let Some(interval) = sort_interval_secs {
+            fetcher.start_background_sorting(interval);
+        }
+
         Ok(fetcher)
     }
 }
 
 impl<C> Fetcher<C>
 where
-    C: ClientT,
+    C: ClientT + Send + Clone + 'static + Sync,
 {
     pub async fn get_tip_block_number(&self) -> Result<BlockNumber, Error> {
         self.call("get_tip_block_number", rpc_params!()).await
@@ -654,11 +718,13 @@ where
     }
 
     pub async fn get_blocks(&self, numbers: Vec<BlockNumber>) -> Result<Vec<BlockView>, Error> {
-        self.batch_request(numbers, |number, batch_request| {
-            batch_request.insert("get_block_by_number", rpc_params!(number))?;
-            Ok(())
-        })
-        .await
+        let mut batch_request = BatchRequestBuilder::new();
+        for number in numbers {
+            batch_request
+                .insert("get_block_by_number", rpc_params!(number))
+                .expect("Failed to insert batch request");
+        }
+        self.batch_request(batch_request).await
     }
 
     pub async fn get_blocks_range<R>(&self, range: R) -> Result<Vec<BlockView>, Error>
@@ -696,11 +762,13 @@ where
         &self,
         hashs: Vec<H256>,
     ) -> Result<Vec<TransactionWithStatusResponse>, Error> {
-        self.batch_request(hashs, |hash, batch_request| {
-            batch_request.insert("get_transaction", rpc_params!(hash))?;
-            Ok(())
-        })
-        .await
+        let mut batch_request = BatchRequestBuilder::new();
+        for hash in hashs {
+            batch_request
+                .insert("get_transaction", rpc_params!(hash))
+                .expect("Failed to insert batch request");
+        }
+        self.batch_request(batch_request).await
     }
 }
 
@@ -710,9 +778,16 @@ mod tests {
     use ckb_jsonrpc_types::{BlockNumber, Either};
 
     async fn get_fetcher() -> Fetcher<HttpClient> {
-        Fetcher::http_client(["https://ckb-rpc.unistate.io"], 500, 5, 10485760, 10485760)
-            .await
-            .unwrap()
+        Fetcher::http_client(
+            ["https://ckb-rpc.unistate.io"],
+            500,
+            5,
+            10485760,
+            10485760,
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     const fn check_send_and_sync<C: Send + Sync>() {}
@@ -722,10 +797,10 @@ mod tests {
     async fn test_fetcher_methods() {
         let database_path = "tmp.redb";
         let database = redb::Database::create(database_path).unwrap();
-        init_db(database);
+        init_db(database).unwrap();
 
         // 创建一个Fetcher实例
-        let mut fetcher = get_fetcher().await;
+        let fetcher = get_fetcher().await;
 
         check_send_and_sync::<Fetcher<HttpClient>>();
 

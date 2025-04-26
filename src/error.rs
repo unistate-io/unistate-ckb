@@ -16,4 +16,6 @@ pub enum Error {
     Fetcher(#[from] fetcher::Error),
     #[error("An error occurred with redb: {0}")]
     Redb(#[from] fetcher::RedbError),
+    #[error("An error occurred with figment: {0}")]
+    Figment(#[from] figment::Error),
 }

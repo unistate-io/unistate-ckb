@@ -53,21 +53,20 @@ async fn main() -> Result<()> {
             info!("config: {config:#?}");
 
             let db = setup_database(&config).await?;
-            let client = config.http_fetcher().await?;
+            config.http_fetcher().await?;
 
             let (initial_height, network, constants) =
                 initialize_blockchain_data(&db, &config, *apply_init_height).await?;
 
-            let mut indexer =
-                index::Indexer::new(initial_height, &config, client, network, constants, db);
+            let mut indexer = index::Indexer::new(initial_height, &config, network, constants, db);
 
             run_with_watchdog(&mut indexer).await?;
         }
         Commands::FetchDepHeights => {
-            let client = config.http_fetcher_without_redb().await?;
+            config.http_fetcher_without_redb().await?;
             let constants = Constants::from_config(config.unistate.optional_config.network);
 
-            fetch_and_print_dep_heights(constants, &client).await?;
+            fetch_and_print_dep_heights(constants).await?;
         }
     }
 

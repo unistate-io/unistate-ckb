@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::CellDep;
 use constants::{Constants, Version};
-use fetcher::{ClientT, Fetcher};
+use fetcher::get_fetcher;
 use prettytable::{Table, row};
 use thiserror::Error;
 
@@ -16,12 +16,9 @@ pub enum Error {
     TransactionNotFound,
 }
 
-pub async fn find_cell_dep_block_height<C: ClientT + Send + Sync>(
-    cell_dep: &CellDep,
-    fetcher: &Fetcher<C>,
-) -> Result<u64, Error> {
+pub async fn find_cell_dep_block_height(cell_dep: &CellDep) -> Result<u64, Error> {
     let tx_hash = cell_dep.out_point.tx_hash.clone();
-    let txs = fetcher.get_txs(vec![tx_hash]).await?;
+    let txs = get_fetcher()?.get_txs(vec![tx_hash]).await?;
     let tx = txs.get(0).ok_or(Error::TransactionNotFound)?;
     let block_height = tx
         .tx_status
@@ -48,10 +45,7 @@ impl DepInfo {
     }
 }
 // Function to fetch and print dependency heights
-pub async fn fetch_and_print_dep_heights<C: ClientT + Send + Sync>(
-    constants: Constants,
-    fetcher: &Fetcher<C>,
-) -> Result<(), Error> {
+pub async fn fetch_and_print_dep_heights(constants: Constants) -> Result<(), Error> {
     let mut dep_list = Vec::new();
 
     // Add spore deps with versions
@@ -114,7 +108,7 @@ pub async fn fetch_and_print_dep_heights<C: ClientT + Send + Sync>(
 
     // Fetch and add rows to the table
     for dep_info in dep_list {
-        match find_cell_dep_block_height(&dep_info.dep, fetcher).await {
+        match find_cell_dep_block_height(&dep_info.dep).await {
             Ok(height) => {
                 table.add_row(row![
                     dep_info.category,

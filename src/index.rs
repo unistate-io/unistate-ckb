@@ -9,7 +9,7 @@ use ckb_jsonrpc_types::{BlockNumber, TransactionView};
 use config::Config;
 use constants::Constants;
 use database::{DatabaseProcessor, Operations};
-use fetcher::{HttpFetcher, get_db};
+use fetcher::{get_db, get_fetcher};
 use futures::future::try_join_all;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sea_orm::DbConn;
@@ -35,7 +35,6 @@ pub struct Indexer {
     batch_size: u64,
     max_batch_size: u64,
     interval: f32,
-    client: HttpFetcher,
     db: DbConn,
     constants: Constants,
     network: NetworkType,
@@ -48,7 +47,6 @@ impl Indexer {
     pub fn new(
         initial_height: u64,
         config: &Config,
-        client: HttpFetcher,
         network: NetworkType,
         constants: Constants,
         db: DbConn,
@@ -61,7 +59,6 @@ impl Indexer {
             batch_size: 0,
             max_batch_size,
             interval,
-            client,
             db,
             constants,
             network,
@@ -143,13 +140,11 @@ impl Indexer {
                 let db_processor_task_handle = task::spawn(database_processor.handle());
 
                 // --- Spawn Batch Processing Task ---
-                let fetcher_clone = self.client.clone();
                 let constants_clone = self.constants;
                 let network_clone = self.network;
 
                 task::spawn(async move {
                     let result = process_batch_inner(
-                        fetcher_clone,
                         constants_clone,
                         network_clone,
                         batch_start_height,
@@ -238,7 +233,7 @@ impl Indexer {
     }
 
     async fn update_target_height(&mut self) -> Result<()> {
-        match self.client.get_tip_block_number().await {
+        match get_fetcher()?.get_tip_block_number().await {
             Ok(tip_number) => {
                 let new_target = tip_number.value();
                 if new_target > self.target_height {
@@ -269,7 +264,6 @@ impl Indexer {
 }
 
 async fn process_batch_inner(
-    fetcher: HttpFetcher,
     constants: Constants,
     network: NetworkType,
     batch_start_height: u64,
@@ -286,7 +280,6 @@ async fn process_batch_inner(
 
     // --- Fetch and Categorize ---
     let (categorized_txs, txs_to_cache) = fetch_and_categorize_transactions(
-        &fetcher,
         batch_start_height,
         batch_end_height,
         &constants, // Pass by reference
@@ -324,7 +317,6 @@ async fn process_batch_inner(
     let xudt_sender = op_sender.clone();
     let rgbpp_sender = op_sender.clone();
     let inscription_sender = op_sender.clone();
-    let rgbpp_fetcher = fetcher.clone();
 
     let spore_txs = categorized_txs.spore_txs;
     let xudt_txs = categorized_txs.xudt_txs;
@@ -371,11 +363,7 @@ async fn process_batch_inner(
             rgbpp_txs.len()
         );
 
-        let rgbpp_future = task::spawn(rgbpp::run_rgbpp_indexing_logic(
-            rgbpp_txs,
-            rgbpp_fetcher,
-            rgbpp_sender,
-        ));
+        let rgbpp_future = task::spawn(rgbpp::run_rgbpp_indexing_logic(rgbpp_txs, rgbpp_sender));
 
         sub_task_futures.push(Box::pin(async move {
             rgbpp_future
@@ -447,7 +435,6 @@ async fn process_batch_inner(
 }
 
 async fn fetch_and_categorize_transactions(
-    fetcher: &HttpFetcher,
     start_number: u64,
     end_number: u64,
     constants: &Constants, // Pass Constants by reference
@@ -470,7 +457,7 @@ async fn fetch_and_categorize_transactions(
     );
 
     // --- Fetch Blocks ---
-    let block_views = fetcher
+    let block_views = get_fetcher()?
         .get_blocks_range(BlockNumber::from(start_number)..BlockNumber::from(end_number))
         .await
         .with_context(|| {

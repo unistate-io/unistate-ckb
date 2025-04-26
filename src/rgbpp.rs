@@ -1,5 +1,6 @@
 use ckb_jsonrpc_types::TransactionView;
 use ckb_types::H256;
+use fetcher::get_fetcher;
 use futures::future::try_join_all;
 use molecule::{
     bytes::Buf,
@@ -17,52 +18,24 @@ use crate::{
 
 pub async fn run_rgbpp_indexing_logic(
     txs: Vec<TransactionView>,
-    fetcher: fetcher::HttpFetcher,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
     let mut tasks = Vec::new();
     for tx in txs {
-        let fetcher = fetcher.clone();
         let op_sender = op_sender.clone();
-        let tx_clone = tx.clone(); // Clone tx to ensure 'static lifetime
+
         tasks.push(tokio::spawn(async move {
-            index_rgbpp_lock(fetcher, tx_clone, op_sender).await
+            index_rgbpp_lock(tx, op_sender).await
         }));
     }
     try_join_all(tasks).await?;
     Ok(())
 }
 
-pub struct RgbppIndexer {
-    txs: Vec<TransactionView>,
-    fetcher: fetcher::HttpFetcher,
-    op_sender: mpsc::UnboundedSender<Operations>,
-}
-
-impl RgbppIndexer {
-    pub fn new(
-        txs: Vec<TransactionView>,
-        fetcher: fetcher::HttpFetcher,
-        op_sender: mpsc::UnboundedSender<Operations>,
-    ) -> Self {
-        Self {
-            txs,
-            fetcher,
-            op_sender,
-        }
-    }
-
-    pub async fn index(self) -> Result<(), anyhow::Error> {
-        run_rgbpp_indexing_logic(self.txs, self.fetcher, self.op_sender).await
-    }
-}
-
-async fn index_rgbpp_lock(
-    fetcher: fetcher::HttpFetcher,
-    tx: TransactionView,
-    op_sender: mpsc::UnboundedSender<Operations>,
+fn process_witnesses(
+    tx: &TransactionView,
+    op_sender: &mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
     tx.inner
         .witnesses
         .par_iter()
@@ -78,30 +51,41 @@ async fn index_rgbpp_lock(
                         .map(|unlock| unlock.to_entity())
                 })
         })
-        .try_for_each(|unlock| upsert_rgbpp_unlock(op_sender.clone(), &unlock, tx.hash.clone()))?;
+        .try_for_each(|unlock| upsert_rgbpp_unlock(op_sender.clone(), &unlock, tx.hash.clone()))
+}
 
-    let pre_outputs = fetcher.get_outputs(tx.inner.inputs).await?;
-
-    pre_outputs
+fn process_outputs(
+    outputs: &[ckb_jsonrpc_types::CellOutput],
+    op_sender: &mpsc::UnboundedSender<Operations>,
+    tx_hash: &H256,
+) -> anyhow::Result<()> {
+    outputs
         .par_iter()
         .filter_map(|output| {
             rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
                 .ok()
                 .map(|reader| reader.to_entity())
         })
-        .try_for_each(|lock| upsert_rgbpp_lock(op_sender.clone(), &lock, tx.hash.clone()))?;
+        .try_for_each(|lock| upsert_rgbpp_lock(op_sender.clone(), &lock, tx_hash.clone()))
+}
 
-    tx.inner
-        .outputs
-        .par_iter()
-        .filter_map(|output| {
-            rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
-                .ok()
-                .map(|reader| reader.to_entity())
-        })
-        .try_for_each(|lock| upsert_rgbpp_lock(op_sender.clone(), &lock, tx.hash.clone()))?;
+fn index_rgbpp_lock(
+    tx: TransactionView,
+    op_sender: mpsc::UnboundedSender<Operations>,
+) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
+    async move {
+        debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
 
-    Ok(())
+        process_witnesses(&tx, &op_sender)?;
+
+        // Process inputs by fetching and then processing their outputs
+        let pre_outputs = get_fetcher()?.get_outputs(tx.inner.inputs).await?;
+        process_outputs(&pre_outputs, &op_sender, &tx.hash)?;
+
+        process_outputs(&tx.inner.outputs, &op_sender, &tx.hash)?;
+
+        Ok(())
+    }
 }
 
 impl rgbpp::RGBPPLock {

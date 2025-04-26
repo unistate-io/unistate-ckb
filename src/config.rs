@@ -31,28 +31,30 @@ impl Config {
     }
 
     #[inline]
-    async fn create_http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+    async fn init_http_fetcher(&self) -> Result<(), crate::error::Error> {
         let fc = &self.unistate.featcher;
-        let fetcher = fetcher::HttpFetcher::http_client(
+        fetcher::init_http_fetcher(
             &self.unistate.urls,
             fc.retry_interval,
             fc.max_retries,
             fc.max_response_size,
             fc.max_request_size,
+            fc.sort_interval_secs,
         )
         .await?;
-        Ok(fetcher)
+        Ok(())
     }
 
-    pub async fn http_fetcher(&self) -> Result<fetcher::HttpFetcher, crate::error::Error> {
+    pub async fn http_fetcher(&self) -> Result<(), crate::error::Error> {
         self.init_redb()?;
-        self.create_http_fetcher().await
+        self.init_http_fetcher().await?;
+        Ok(())
     }
 
-    pub async fn http_fetcher_without_redb(
-        &self,
-    ) -> Result<fetcher::HttpFetcher, crate::error::Error> {
-        self.create_http_fetcher().await
+    pub async fn http_fetcher_without_redb(&self) -> Result<(), crate::error::Error> {
+        self.init_http_fetcher().await?;
+
+        Ok(())
     }
 }
 
@@ -74,6 +76,7 @@ pub(crate) struct FeatcherConfig {
     pub(crate) max_request_size: u32,
     pub(crate) redb_path: PathBuf,
     pub(crate) disable_cached: bool,
+    pub(crate) sort_interval_secs: Option<u64>,
 }
 
 impl Default for FeatcherConfig {
@@ -85,6 +88,7 @@ impl Default for FeatcherConfig {
             max_response_size: 100 * MB,
             redb_path: PathBuf::from("unistate.redb"),
             disable_cached: true,
+            sort_interval_secs: Some(600),
         }
     }
 }
