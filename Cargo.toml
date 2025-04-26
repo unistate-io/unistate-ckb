@@ -1,6 +1,6 @@
 [package]
 name = "unistate-ckb"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
@@ -48,6 +48,7 @@ parking_lot = "0.12"
 smallvec = "1.15"
 prettytable-rs = { version = "0.10", default-features = false }
 bech32 = "0.11"
+crabtime = "1.1"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }

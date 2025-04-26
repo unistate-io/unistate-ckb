@@ -19,15 +19,14 @@ use tokio::{
     task::{self, JoinHandle},
     time,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use utils::network::NetworkType;
 
 use crate::{categorization, config, database, inscription, rgbpp, spore, xudt};
 
 use categorization::{CategorizedTxs, categorize_transaction};
 
-// Consider making this configurable
-const MAX_CONCURRENT_BATCHES: usize = 4;
+const MAX_CONCURRENT_BATCHES: usize = 10;
 
 pub struct Indexer {
     height: u64,
@@ -38,7 +37,6 @@ pub struct Indexer {
     db: DbConn,
     constants: Constants,
     network: NetworkType,
-    // State for pipelined processing
     db_commit_handles: VecDeque<JoinHandle<Result<()>>>,
     inflight_semaphore: Arc<Semaphore>,
 }
@@ -71,48 +69,73 @@ impl Indexer {
         self.update_target_height().await?;
 
         loop {
-            // --- Cleanup finished DB tasks ---
             while let Some(handle) = self.db_commit_handles.front() {
                 if handle.is_finished() {
                     let finished_handle = self.db_commit_handles.pop_front().unwrap();
                     match finished_handle.await {
                         Ok(Ok(())) => {
-                            info!("Background DB commit task finished successfully.")
+                            debug!("Background DB commit task finished successfully.")
                         }
                         Ok(Err(db_err)) => {
-                            // Critical error: Decide whether to stop the indexer
                             error!(
-                                "Background DB commit task failed: {:?}. Halting may be necessary.",
+                                "Background DB commit task failed: {:?}. Halting indexer.",
                                 db_err
                             );
                             return Err(db_err).context("Background DB commit task failed");
                         }
                         Err(join_err) => {
-                            // Critical error: Decide whether to stop the indexer
                             error!(
-                                "Error joining background DB task: {:?}. Halting may be necessary.",
+                                "Error joining background DB task: {:?}. Halting indexer.",
                                 join_err
                             );
                             return Err(join_err).context("Failed to join background DB task");
                         }
                     }
                 } else {
-                    // The first handle is not finished, so subsequent ones likely aren't either.
                     break;
                 }
             }
 
-            // --- Determine batch size ---
             self.batch_size =
                 (self.target_height.saturating_sub(self.height)).min(self.max_batch_size);
 
             if self.batch_size > 0 {
-                // --- Acquire semaphore permit ---
-                // This limits the number of concurrent processing+committing batches.
-                let _permit = match self.inflight_semaphore.clone().acquire_owned().await {
+                while self.db_commit_handles.len() >= MAX_CONCURRENT_BATCHES {
+                    info!(
+                        "Commit pipeline full ({} pending). Waiting for oldest commit task to complete...",
+                        self.db_commit_handles.len()
+                    );
+                    if let Some(oldest_handle) = self.db_commit_handles.pop_front() {
+                        match oldest_handle.await {
+                            Ok(Ok(())) => {
+                                info!("Oldest DB commit task finished successfully while waiting.");
+                            }
+                            Ok(Err(db_err)) => {
+                                error!(
+                                    "Oldest DB commit task failed while waiting: {:?}. Halting indexer.",
+                                    db_err
+                                );
+                                return Err(db_err)
+                                    .context("Oldest background DB commit task failed");
+                            }
+                            Err(join_err) => {
+                                error!(
+                                    "Error joining oldest DB task while waiting: {:?}. Halting indexer.",
+                                    join_err
+                                );
+                                return Err(join_err)
+                                    .context("Failed to join oldest background DB task");
+                            }
+                        }
+                    } else {
+                        warn!("Commit handle queue was unexpectedly empty while waiting.");
+                        break;
+                    }
+                }
+
+                let permit = match self.inflight_semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(e) => {
-                        // This should not happen if semaphore is used correctly
                         error!("Failed to acquire semaphore permit: {}", e);
                         return Err(anyhow::anyhow!("Failed to acquire semaphore permit: {}", e));
                     }
@@ -123,34 +146,32 @@ impl Indexer {
                 let inclusive_end_height = batch_end_height.saturating_sub(1);
 
                 info!(
-                    "Dispatching batch: blocks {}..={} ({} items) | Current Height: {} | Target Height: {} | Inflight: {}",
+                    "Dispatching batch: blocks {}..={} ({} items) | Current Height: {} | Target Height: {} | Inflight: {}/{}",
                     batch_start_height,
                     inclusive_end_height,
                     self.batch_size,
                     self.height,
                     self.target_height,
                     MAX_CONCURRENT_BATCHES - self.inflight_semaphore.available_permits(),
+                    MAX_CONCURRENT_BATCHES
                 );
 
-                // --- Setup DB Processor for this batch ---
-                // The commit_signal_sender is used to tell the DB processor it's safe to commit.
                 let (database_processor, op_sender, commit_signal_sender) =
                     DatabaseProcessor::new(self.db.clone(), inclusive_end_height);
-                // Spawn the DB processor task itself
                 let db_processor_task_handle = task::spawn(database_processor.handle());
 
-                // --- Spawn Batch Processing Task ---
                 let constants_clone = self.constants;
                 let network_clone = self.network;
+                let op_sender_clone = op_sender.clone();
 
-                task::spawn(async move {
+                let processing_task_handle = task::spawn(async move {
                     let result = process_batch_inner(
                         constants_clone,
                         network_clone,
                         batch_start_height,
                         batch_end_height,
-                        op_sender,            // op_sender is moved here
-                        commit_signal_sender, // commit_signal_sender is moved here
+                        op_sender_clone,
+                        commit_signal_sender,
                         batch_start_height,
                         inclusive_end_height,
                     )
@@ -161,67 +182,80 @@ impl Indexer {
                             "Error processing batch {}..={}: {:?}",
                             batch_start_height, inclusive_end_height, e
                         );
-                        // Don't send commit signal if processing failed.
-                        // The DB processor will eventually time out or exit gracefully
-                        // when op_sender is dropped if not already done.
-                        // Permit is dropped automatically when this task scope ends.
                     }
-                    // If processing succeeded, the commit_signal_sender was sent inside process_batch_inner
-                    // Permit is dropped automatically when this task scope ends.
                 });
 
-                // --- Spawn a separate task to manage DB commit and release semaphore ---
                 let db_commit_waiter_handle = task::spawn(async move {
-                    // Directly wait for the DB processor task to finish.
-                    // The DB processor internally waits for the commit signal sent by process_batch_inner.
-                    let db_result = db_processor_task_handle.await; // Wait for DB commit task
-
-                    // Permit is dropped automatically when this task scope ends.
-                    // Return the result of the DB operation.
+                    if let Err(join_err) = processing_task_handle.await {
+                        error!(
+                            "Processing task for batch {}..={} panicked or was cancelled: {:?}",
+                            batch_start_height, inclusive_end_height, join_err
+                        );
+                        drop(db_processor_task_handle);
+                        return Err(anyhow::Error::from(join_err).context(format!(
+                            "Processing task join error for batch {}..={}",
+                            batch_start_height, inclusive_end_height
+                        )));
+                    }
+                    let db_result = db_processor_task_handle.await;
+                    drop(permit);
                     match db_result {
                         Ok(Ok(())) => Ok(()),
-                        Ok(Err(db_err)) => Err(db_err).context("Database processor task failed"),
-                        Err(join_err) => {
-                            Err(join_err).context("Failed to join Database processor task")
-                        }
+                        Ok(Err(db_err)) => Err(db_err).context(format!(
+                            "Database processor task failed for batch ending {}",
+                            inclusive_end_height
+                        )),
+                        Err(join_err) => Err(anyhow::Error::from(join_err)).context(format!(
+                            "Failed to join Database processor task for batch ending {}",
+                            inclusive_end_height
+                        )),
                     }
                 });
 
-                // Store the handle for the waiter task (which includes DB commit)
                 self.db_commit_handles.push_back(db_commit_waiter_handle);
-
-                // --- Update height immediately to allow next iteration ---
                 self.update_height();
             } else {
-                // --- Caught up, wait for remaining commits and new blocks ---
                 if !self.db_commit_handles.is_empty() {
                     info!(
-                        "Caught up to target height {}. Waiting for {} pending DB commit(s)...",
+                        "Caught up to target height {}. Waiting for {} pending DB commit(s) to finish...",
                         self.target_height,
                         self.db_commit_handles.len()
                     );
                     while let Some(handle) = self.db_commit_handles.pop_front() {
                         match handle.await {
-                            Ok(Ok(())) => info!("Final DB commit finished successfully."),
-                            Ok(Err(db_err)) => error!("Final DB commit failed: {:?}", db_err), // Potentially halt
-                            Err(join_err) => error!("Error joining final DB task: {:?}", join_err), // Potentially halt
+                            Ok(Ok(())) => info!("Final batch DB commit finished successfully."),
+                            Ok(Err(db_err)) => {
+                                error!(
+                                    "Final batch DB commit failed: {:?}. Halting indexer.",
+                                    db_err
+                                );
+                                return Err(db_err).context("Final batch DB commit task failed");
+                            }
+                            Err(join_err) => {
+                                error!(
+                                    "Error joining final DB task: {:?}. Halting indexer.",
+                                    join_err
+                                );
+                                return Err(join_err).context("Failed to join final DB task");
+                            }
                         }
-                        // Ensure semaphore permits are released if awaited here (they should be by the waiter task)
                     }
                     info!("All pending DB commits finished.");
                 } else {
                     info!(
-                        "Caught up to target height {}. Waiting for new blocks...",
+                        "Caught up to target height {}. No pending commits. Waiting for new blocks...",
                         self.target_height
                     );
                 }
 
-                // Wait for new blocks before checking again
                 time::sleep(Duration::from_secs(6)).await;
                 self.update_target_height().await?;
 
-                // Optional interval sleep only if fully caught up AND interval > 0
-                if self.height >= self.target_height && self.interval > 0.0 {
+                if self.height >= self.target_height
+                    && self.interval > 0.0
+                    && self.db_commit_handles.is_empty()
+                {
+                    debug!("Sleeping for interval: {}s", self.interval);
                     time::sleep(Duration::from_secs_f32(self.interval)).await;
                 }
             }
@@ -240,13 +274,11 @@ impl Indexer {
                     info!("New tip height detected: {}", new_target);
                     self.target_height = new_target;
                 } else if new_target < self.target_height {
-                    // This might happen during a reorg, allow target to decrease.
                     warn!(
                         "Node tip height ({}) is lower than current target height ({}). Possible reorg. Adjusting target.",
                         new_target, self.target_height
                     );
                     self.target_height = new_target;
-                    // NOTE: A robust indexer would need explicit reorg handling logic here or elsewhere.
                 }
                 Ok(())
             }
@@ -255,8 +287,6 @@ impl Indexer {
                     "Failed to get tip block number: {:?}. Retaining previous target height {}.",
                     e, self.target_height
                 );
-                // Don't update target_height on error, retry next cycle.
-                // Return error to potentially stop the indexer if desired.
                 Err(e).context("Failed to get tip block number")
             }
         }
@@ -269,54 +299,60 @@ async fn process_batch_inner(
     batch_start_height: u64,
     batch_end_height: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
-    commit_tx: oneshot::Sender<()>, // Signal that processing is done
+    commit_tx: oneshot::Sender<()>,
     processing_log_start: u64,
     processing_log_end: u64,
 ) -> Result<()> {
+    let _sender_guard = SenderGuard(op_sender.clone());
+
     info!(
         "Starting processing task for batch: {} - {}",
         processing_log_start, processing_log_end
     );
 
-    // --- Fetch and Categorize ---
-    let (categorized_txs, txs_to_cache) = fetch_and_categorize_transactions(
-        batch_start_height,
-        batch_end_height,
-        &constants, // Pass by reference
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "Failed to fetch and categorize transactions for batch {} - {}",
-            processing_log_start, processing_log_end
-        )
-    })?;
+    let (categorized_txs, txs_to_cache) =
+        fetch_and_categorize_transactions(batch_start_height, batch_end_height, &constants)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to fetch and categorize transactions for batch {} - {}",
+                    processing_log_start, processing_log_end
+                )
+            })?;
 
-    // --- Cache Transactions (Optional) ---
-    // Moved out of the parallel categorization loop
     if !txs_to_cache.is_empty() {
         if let Ok(db) = get_db() {
-            for tx in txs_to_cache {
-                // Clone the hash before tx is moved
-                let tx_hash = tx.hash.clone();
-                if let Err(e) = fetcher::cache_transaction(db, tx) {
-                    // Pass guard ref
-                    warn!(
-                        "Failed to cache transaction {} in batch {} - {}: {}",
-                        tx_hash, processing_log_start, processing_log_end, e
-                    );
+            let cache_result = task::spawn_blocking(move || -> Result<(), fetcher::Error> {
+                for tx in txs_to_cache {
+                    let tx_hash = tx.hash.clone();
+                    if let Err(e) = fetcher::cache_transaction(db, tx) {
+                        warn!(
+                            "Failed to cache transaction {} in batch {} - {}: {}",
+                            tx_hash, processing_log_start, processing_log_end, e
+                        );
+                    }
                 }
+                Ok(())
+            })
+            .await;
+
+            if let Err(e) = cache_result {
+                error!("Error during background transaction caching task: {:?}", e);
+            } else if let Ok(Err(cache_err)) = cache_result {
+                error!(
+                    "Error within background transaction caching: {:?}",
+                    cache_err
+                );
             }
         }
     }
 
-    // --- Spawn Sub-Indexer Tasks ---
     let mut sub_task_futures: Vec<Pin<Box<dyn Future<Output = Result<()>> + Send>>> = Vec::new();
 
-    let spore_sender = op_sender.clone();
-    let xudt_sender = op_sender.clone();
-    let rgbpp_sender = op_sender.clone();
-    let inscription_sender = op_sender.clone();
+    let spore_sender = _sender_guard.0.clone();
+    let xudt_sender = _sender_guard.0.clone();
+    let rgbpp_sender = _sender_guard.0.clone();
+    let inscription_sender = _sender_guard.0.clone();
 
     let spore_txs = categorized_txs.spore_txs;
     let xudt_txs = categorized_txs.xudt_txs;
@@ -330,14 +366,14 @@ async fn process_batch_inner(
             processing_log_end,
             spore_txs.len()
         );
-        let constants_clone = constants; // Constants is Copy
-        let network_clone = network; // NetworkType is Copy
+        let constants_clone = constants;
+        let network_clone = network;
         let handle = task::spawn_blocking(move || {
             spore::SporeIndexer::new(spore_txs, network_clone, constants_clone, spore_sender)
                 .index()
         });
         sub_task_futures.push(Box::pin(async move {
-            handle.await.map_err(anyhow::Error::from)? // Flatten JoinError
+            handle.await.map_err(anyhow::Error::from)?
         }));
     }
     if !xudt_txs.is_empty() {
@@ -393,7 +429,6 @@ async fn process_batch_inner(
         }));
     }
 
-    // --- Wait for Sub-Indexers ---
     if !sub_task_futures.is_empty() {
         info!(
             "Waiting for {} sub-indexer task(s) for batch {} - {}...",
@@ -418,11 +453,13 @@ async fn process_batch_inner(
         );
     }
 
-    // --- Signal DB Processor to Commit ---
-    // Send the signal *after* all sub-tasks (which send Ops) are complete.
     commit_tx.send(()).map_err(|_| {
-        anyhow::anyhow!(
+        error!(
             "Failed to send commit signal: DB processor receiver dropped for batch ending {}.",
+            processing_log_end
+        );
+        anyhow::anyhow!(
+            "DB processor receiver dropped for batch ending {}",
             processing_log_end
         )
     })?;
@@ -431,15 +468,24 @@ async fn process_batch_inner(
         processing_log_start, processing_log_end
     );
 
+    drop(_sender_guard);
+
     Ok(())
+}
+
+struct SenderGuard(mpsc::UnboundedSender<Operations>);
+
+impl Drop for SenderGuard {
+    fn drop(&mut self) {
+        debug!("Operation sender dropped.");
+    }
 }
 
 async fn fetch_and_categorize_transactions(
     start_number: u64,
     end_number: u64,
-    constants: &Constants, // Pass Constants by reference
+    constants: &Constants,
 ) -> Result<(CategorizedTxs, Vec<TransactionView>)> {
-    // Return txs for caching
     let count = end_number.saturating_sub(start_number);
     let inclusive_end_number = end_number.saturating_sub(1);
 
@@ -456,7 +502,6 @@ async fn fetch_and_categorize_transactions(
         count, start_number, inclusive_end_number
     );
 
-    // --- Fetch Blocks ---
     let block_views = get_fetcher()?
         .get_blocks_range(BlockNumber::from(start_number)..BlockNumber::from(end_number))
         .await
@@ -475,39 +520,33 @@ async fn fetch_and_categorize_transactions(
             end_number,
             count
         );
-        // Continue processing with the blocks received.
         if block_views.is_empty() {
             return Ok((CategorizedTxs::new(), Vec::new()));
         }
     }
 
-    // --- Parallel Categorization (Over Blocks) ---
     let results = block_views
-        .into_par_iter() // Parallelize over blocks
+        .into_par_iter()
         .filter_map(|block| {
-            // Use filter_map to handle potential errors or skips gracefully
             let block_num = block.header.inner.number.value();
-            // Strict check: only process blocks within the *requested* range.
-            // get_blocks_range *should* guarantee this, but belts and suspenders.
             if block_num < start_number || block_num >= end_number {
                 error!(
                     "Received block {} outside of requested range {}..{}. Skipping.",
                     block_num, start_number, end_number
                 );
-                return None; // Skip this block
+                return None;
             }
 
             let timestamp = block.header.inner.timestamp.value();
             let mut block_categorized_txs = CategorizedTxs::new();
             let mut block_txs_to_cache = Vec::with_capacity(block.transactions.len());
 
-            // Process transactions sequentially *within* this block's task
             for tx in block.transactions {
-                let categorizes = categorize_transaction(&tx, constants); // Pass tx by reference
+                let categorizes = categorize_transaction(&tx, constants);
 
                 if categorizes.is_spore {
                     block_categorized_txs.spore_txs.push(SporeTx {
-                        tx: tx.clone(), // Clone only when needed
+                        tx: tx.clone(),
                         timestamp,
                     });
                 }
@@ -521,20 +560,17 @@ async fn fetch_and_categorize_transactions(
                     block_categorized_txs.inscription_txs.push(tx.clone());
                 }
 
-                // Collect for caching after parallel processing
                 if get_db().is_ok() {
-                    // Only collect if caching is enabled
-                    block_txs_to_cache.push(tx); // Clones the TransactionView
+                    block_txs_to_cache.push(tx);
                 }
             }
             Some((block_categorized_txs, block_txs_to_cache))
         })
         .reduce(
-            || (CategorizedTxs::new(), Vec::new()), // Identity element for reduction
+            || (CategorizedTxs::new(), Vec::new()),
             |mut a, b| {
-                // Reducer function
-                a.0 = a.0.merge(b.0); // Merge CategorizedTxs
-                a.1.extend(b.1); // Extend Vec<TransactionView>
+                a.0 = a.0.merge(b.0);
+                a.1.extend(b.1);
                 a
             },
         );
