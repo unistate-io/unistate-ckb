@@ -7,6 +7,7 @@ services:
       POSTGRES_DB: unistate_dev
       POSTGRES_USER: unistate_dev
       POSTGRES_PASSWORD: unistate_dev
+      POSTGRES_HOST_AUTH_METHOD: trust # 允许所有连接免密码（仅限开发环境！）
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -16,7 +17,15 @@ services:
     image: postgres
     depends_on:
       - db
-    command: ["psql", "-h", "db", "-U", "unistate_dev", "unistate_dev"]
+    command:
+      - sh
+      - -c
+      - |
+        until psql -h db -U unistate_dev -d unistate_dev -c "SELECT 1"; do
+          echo "Waiting for database..."
+          sleep 1
+        done
+        psql -h db -U unistate_dev -d unistate_dev
 
 volumes:
   pgdata:

@@ -31,6 +31,7 @@ mod categorization;
 mod config;
 mod database;
 mod error;
+mod helper;
 mod index;
 mod inscription;
 mod rgbpp;

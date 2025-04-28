@@ -1,6 +1,6 @@
 [package]
 name = "unistate-ckb"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
@@ -61,7 +61,7 @@ ckb-hash = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
 molecule = { workspace = true }
-sea-orm = { workspace = true, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-bigdecimal"] }
+sea-orm = { workspace = true, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-chrono", "with-bigdecimal", "with-json"] }
 bigdecimal = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 chrono = { workspace = true, features = ["serde"] }

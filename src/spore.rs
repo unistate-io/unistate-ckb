@@ -1,19 +1,20 @@
 use ckb_jsonrpc_types::TransactionView;
-use ckb_types::{H256, packed};
-use molecule::{
-    bytes::Buf,
-    prelude::{Entity as _, Reader as _},
-};
+use ckb_types::H256;
+use molecule::{bytes::Bytes, prelude::Reader as _};
 use rayon::iter::{
-    IndexedParallelIterator, IntoParallelIterator as _, IntoParallelRefIterator, ParallelIterator,
+    IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
+    ParallelIterator,
 };
-use sea_orm::Set;
+use sea_orm::{Set, prelude::Json};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
+use utils::network::NetworkType;
 
+use crate::helper::{to_timestamp_naive, upsert_address};
 use crate::{
     database::Operations,
-    entity::{self, addresses},
+    entity::{self, clusters, spore_actions, spores},
     schemas::{
         action, spore_v1, spore_v2,
         top_level::{WitnessLayoutReader, WitnessLayoutUnionReader},
@@ -22,120 +23,119 @@ use crate::{
 
 use constants::Constants;
 
+// Struct to hold transaction context
+#[derive(Debug, Clone)] // Add Clone derive
 pub struct SporeTx {
     pub tx: TransactionView,
     pub timestamp: u64,
+    pub block_number: u64,
 }
 
-pub struct SporeIndexer {
+// Main indexer function
+pub fn index_spores(
     txs: Vec<SporeTx>,
-    network: utils::network::NetworkType,
+    network: NetworkType,
     constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
+) -> Result<(), anyhow::Error> {
+    // Iterate over contexts
+    txs.into_par_iter().try_for_each(|ctx| {
+        index_spore(
+            ctx.tx,           // Pass tx from context
+            ctx.timestamp,    // Pass timestamp from context
+            ctx.block_number, // Pass block_number from context
+            network,
+            op_sender.clone(),
+            constants,
+        )
+    })?;
+
+    Ok(())
 }
 
-impl SporeIndexer {
-    pub fn new(
-        txs: Vec<SporeTx>,
-        network: utils::network::NetworkType,
-        constants: Constants,
-        op_sender: mpsc::UnboundedSender<Operations>,
-    ) -> Self {
-        Self {
-            txs,
-            network,
-            constants,
-            op_sender,
-        }
-    }
-
-    pub fn index(self) -> Result<(), anyhow::Error> {
-        let Self {
-            txs,
-            network,
-            constants,
-            op_sender,
-        } = self;
-
-        txs.into_par_iter().try_for_each(|tx| {
-            index_spore(tx.tx, tx.timestamp, network, op_sender.clone(), constants)
-        })?;
-
-        Ok(())
-    }
-}
-
+// Internal data structures
 enum DataVariant {
     Spore(spore_v1::SporeData),
     ClusterV2(spore_v2::ClusterDataV2),
     ClusterV1(spore_v1::ClusterData),
 }
 
-struct Data {
-    id: Vec<u8>,
-    type_id: action::AddressUnion,
-    to: action::AddressUnion,
+struct OutputData {
+    id: Vec<u8>, // Spore or Cluster ID
+    type_id_script: action::AddressUnion,
+    to_address_script: action::AddressUnion,
     variant: DataVariant,
+    output_index: usize, // Need the index for creation context
 }
 
 fn index_spore(
     tx: TransactionView,
     timestamp: u64,
-    network: utils::network::NetworkType,
+    block_number: u64,
+    network: NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
     constants: Constants,
 ) -> anyhow::Result<()> {
-    debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
+    debug!("Indexing Spore for tx: {}", tx.hash);
+
+    let tx_hash = tx.hash.clone();
 
     tx.inner
         .outputs_data
         .par_iter()
         .zip(tx.inner.outputs.par_iter())
-        .filter_map(|(output_data, output_cell)| {
-            output_cell
-                .type_
-                .as_ref()
-                .and_then(|s| s.args.as_bytes().get(..32).map(|v| v.to_vec()))
-                .zip(output_cell.type_.as_ref())
-                .and_then(|(id, type_script)| {
-                    if constants.is_spore_type(type_script) {
-                        debug!("is spore!");
-                        spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes())
+        .enumerate()
+        .filter_map(|(index, (output_data, output_cell))| {
+            let type_script = output_cell.type_.as_ref()?;
+            let id = type_script.args.as_bytes().get(..32)?.to_vec();
+
+            let variant = if constants.is_spore_type(type_script) {
+                spore_v1::SporeDataReader::from_compatible_slice(output_data.as_bytes())
+                    .ok()
+                    .map(|reader| reader.to_entity())
+                    .map(DataVariant::Spore)
+            } else if constants.is_cluster_type(type_script) {
+                spore_v2::ClusterDataV2Reader::from_compatible_slice(output_data.as_bytes())
+                    .ok()
+                    .map(|reader| reader.to_entity())
+                    .map(DataVariant::ClusterV2)
+                    .or_else(|| {
+                        spore_v1::ClusterDataReader::from_compatible_slice(output_data.as_bytes())
                             .ok()
                             .map(|reader| reader.to_entity())
-                            .map(DataVariant::Spore)
-                    } else if constants.is_cluster_type(type_script) {
-                        debug!("is cluster!");
-                        spore_v2::ClusterDataV2Reader::from_compatible_slice(output_data.as_bytes())
-                            .ok()
-                            .map(|reader| reader.to_entity())
-                            .map(DataVariant::ClusterV2)
-                            .or(spore_v1::ClusterDataReader::from_compatible_slice(
-                                output_data.as_bytes(),
-                            )
-                            .ok()
-                            .map(|reader| reader.to_entity())
-                            .map(DataVariant::ClusterV1))
-                    } else {
-                        None
-                    }
-                    .map(|variant| Data {
-                        variant,
-                        to: action::AddressUnion::from_json_script(output_cell.lock.clone()),
-                        type_id: action::AddressUnion::from_json_script(type_script.clone()),
-                        id,
+                            .map(DataVariant::ClusterV1)
                     })
-                })
+            } else {
+                None
+            };
+
+            variant.map(|v| OutputData {
+                variant: v,
+                to_address_script: action::AddressUnion::from_json_script(output_cell.lock.clone()),
+                type_id_script: action::AddressUnion::from_json_script(type_script.clone()),
+                id,
+                output_index: index,
+            })
         })
-        .try_for_each(|data| upsert_spores(data, network, timestamp, op_sender.clone()))?;
+        .try_for_each(|output_data| {
+            upsert_spore_or_cluster(
+                output_data,
+                network,
+                block_number,
+                &tx_hash,
+                timestamp,
+                op_sender.clone(),
+            )
+        })?;
 
     extract_actions(&tx)
         .into_par_iter()
-        .try_for_each(|action| {
+        .try_for_each(|action_data| {
             insert_action(
-                action,
-                tx.hash.clone(),
+                action_data,
+                &tx_hash,
                 network,
+                block_number,
                 timestamp,
                 op_sender.clone(),
             )
@@ -144,6 +144,7 @@ fn index_spore(
     Ok(())
 }
 
+// --- Action related methods ---
 impl action::SporeActionUnion {
     fn action_type(&self) -> entity::sea_orm_active_enums::SporeActionType {
         use entity::sea_orm_active_enums::SporeActionType;
@@ -169,22 +170,12 @@ impl action::SporeActionUnion {
                 Some(raw.spore_id().raw_data().to_vec())
             }
             action::SporeActionUnion::BurnSpore(raw) => Some(raw.spore_id().raw_data().to_vec()),
-            action::SporeActionUnion::MintCluster(_) => None,
-            action::SporeActionUnion::TransferCluster(_) => None,
-            action::SporeActionUnion::MintProxy(_) => None,
-            action::SporeActionUnion::TransferProxy(_) => None,
-            action::SporeActionUnion::BurnProxy(_) => None,
-            action::SporeActionUnion::MintAgent(_) => None,
-            action::SporeActionUnion::TransferAgent(_) => None,
-            action::SporeActionUnion::BurnAgent(_) => None,
+            _ => None,
         }
     }
 
     fn cluster_id(&self) -> Option<Vec<u8>> {
         match self {
-            action::SporeActionUnion::MintSpore(_) => None,
-            action::SporeActionUnion::TransferSpore(_) => None,
-            action::SporeActionUnion::BurnSpore(_) => None,
             action::SporeActionUnion::MintCluster(raw) => {
                 Some(raw.cluster_id().raw_data().to_vec())
             }
@@ -201,114 +192,119 @@ impl action::SporeActionUnion {
                 Some(raw.cluster_id().raw_data().to_vec())
             }
             action::SporeActionUnion::BurnAgent(raw) => Some(raw.cluster_id().raw_data().to_vec()),
+            _ => None,
         }
     }
 
     fn proxy_id(&self) -> Option<Vec<u8>> {
         match self {
-            action::SporeActionUnion::MintSpore(_) => None,
-            action::SporeActionUnion::TransferSpore(_) => None,
-            action::SporeActionUnion::BurnSpore(_) => None,
-            action::SporeActionUnion::MintCluster(_) => None,
-            action::SporeActionUnion::TransferCluster(_) => None,
             action::SporeActionUnion::MintProxy(raw) => Some(raw.proxy_id().raw_data().to_vec()),
             action::SporeActionUnion::TransferProxy(raw) => {
-                Some(raw.cluster_id().raw_data().to_vec())
+                Some(raw.proxy_id().raw_data().to_vec())
             }
             action::SporeActionUnion::BurnProxy(raw) => Some(raw.proxy_id().raw_data().to_vec()),
             action::SporeActionUnion::MintAgent(raw) => Some(raw.proxy_id().raw_data().to_vec()),
-            action::SporeActionUnion::TransferAgent(_) => None,
-            action::SporeActionUnion::BurnAgent(_) => None,
+            _ => None,
         }
     }
 
+    // Get 'from' address ID, ensuring address exists in DB
     #[allow(clippy::wrong_self_convention)]
-    fn from_address_id(&self, network: utils::network::NetworkType) -> Option<String> {
-        self.from_address()
-            .and_then(|address| address.to_string(network))
+    fn from_address_id(
+        &self,
+        network: NetworkType,
+        block_number: u64,
+        tx_hash: &H256,
+        timestamp: u64,
+        op_sender: mpsc::UnboundedSender<Operations>,
+    ) -> Option<String> {
+        self.from_address().and_then(|address| {
+            match upsert_address(
+                // Use helper
+                &address,
+                network,
+                block_number,
+                tx_hash,
+                timestamp,
+                op_sender,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    error!("Failed to upsert 'from' address for action: {:?}", e);
+                    None
+                }
+            }
+        })
     }
 
-    fn to_address_id(&self, network: utils::network::NetworkType) -> Option<String> {
-        self.to_address()
-            .and_then(|address| address.to_string(network))
+    // Get 'to' address ID, ensuring address exists in DB
+    fn to_address_id(
+        &self,
+        network: NetworkType,
+        block_number: u64,
+        tx_hash: &H256,
+        timestamp: u64,
+        op_sender: mpsc::UnboundedSender<Operations>,
+    ) -> Option<String> {
+        self.to_address().and_then(|address| {
+            match upsert_address(
+                // Use helper
+                &address,
+                network,
+                block_number,
+                tx_hash,
+                timestamp,
+                op_sender,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    error!("Failed to upsert 'to' address for action: {:?}", e);
+                    None
+                }
+            }
+        })
     }
 
+    // Extract 'from' address script
     #[allow(clippy::wrong_self_convention)]
     fn from_address(&self) -> Option<action::AddressUnion> {
         match self {
-            action::SporeActionUnion::MintSpore(_) => None,
             action::SporeActionUnion::TransferSpore(raw) => Some(raw.from().to_enum()),
             action::SporeActionUnion::BurnSpore(raw) => Some(raw.from().to_enum()),
-            action::SporeActionUnion::MintCluster(_) => None,
             action::SporeActionUnion::TransferCluster(raw) => Some(raw.from().to_enum()),
-            action::SporeActionUnion::MintProxy(_) => None,
             action::SporeActionUnion::TransferProxy(raw) => Some(raw.from().to_enum()),
             action::SporeActionUnion::BurnProxy(raw) => Some(raw.from().to_enum()),
-            action::SporeActionUnion::MintAgent(_) => None,
             action::SporeActionUnion::TransferAgent(raw) => Some(raw.from().to_enum()),
             action::SporeActionUnion::BurnAgent(raw) => Some(raw.from().to_enum()),
+            _ => None, // Mint actions don't have 'from'
         }
     }
 
+    // Extract 'to' address script
     fn to_address(&self) -> Option<action::AddressUnion> {
         match self {
             action::SporeActionUnion::MintSpore(raw) => Some(raw.to().to_enum()),
             action::SporeActionUnion::TransferSpore(raw) => Some(raw.to().to_enum()),
-            action::SporeActionUnion::BurnSpore(_) => None,
             action::SporeActionUnion::MintCluster(raw) => Some(raw.to().to_enum()),
             action::SporeActionUnion::TransferCluster(raw) => Some(raw.to().to_enum()),
             action::SporeActionUnion::MintProxy(raw) => Some(raw.to().to_enum()),
             action::SporeActionUnion::TransferProxy(raw) => Some(raw.to().to_enum()),
-            action::SporeActionUnion::BurnProxy(_) => None,
             action::SporeActionUnion::MintAgent(raw) => Some(raw.to().to_enum()),
             action::SporeActionUnion::TransferAgent(raw) => Some(raw.to().to_enum()),
-            action::SporeActionUnion::BurnAgent(_) => None,
+            _ => None, // Burn actions don't have 'to'
         }
     }
 
-    fn data_hash(&self) -> Option<Vec<u8>> {
-        match self {
-            action::SporeActionUnion::MintSpore(raw) => Some(raw.data_hash().raw_data().to_vec()),
-            action::SporeActionUnion::TransferSpore(_) => None,
-            action::SporeActionUnion::BurnSpore(_) => None,
-            action::SporeActionUnion::MintCluster(_) => None,
-            action::SporeActionUnion::TransferCluster(_) => None,
-            action::SporeActionUnion::MintProxy(_) => None,
-            action::SporeActionUnion::TransferProxy(_) => None,
-            action::SporeActionUnion::BurnProxy(_) => None,
-            action::SporeActionUnion::MintAgent(_) => None,
-            action::SporeActionUnion::TransferAgent(_) => None,
-            action::SporeActionUnion::BurnAgent(_) => None,
-        }
+    // Serialize action to JSON containing raw hex bytes
+    fn to_action_data_json(&self) -> Option<Json> {
+        let bytes: Bytes = self.as_bytes(); // SporeActionUnion implements Entity, which has as_bytes()
+        let hex_string = hex::encode(bytes.as_ref());
+        // Store as a JSON object with a specific key for clarity
+        Some(json!({ "raw_hex": hex_string }))
     }
 }
 
-impl action::AddressUnion {
-    pub fn from_json_script(script: ckb_jsonrpc_types::Script) -> Self {
-        use ckb_types::prelude::Entity;
-        Self::Script(action::Script::new_unchecked(
-            packed::Script::from(script).as_bytes(),
-        ))
-    }
-
-    fn to_string(&self, network: utils::network::NetworkType) -> Option<String> {
-        let script_bytes = self.script().as_bytes();
-        match utils::address::script_bytes_to_address(script_bytes.as_ref(), network) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                error!("Failed to convert address: {:?}", e);
-                None
-            }
-        }
-    }
-
-    fn script(&self) -> &action::Script {
-        match self {
-            action::AddressUnion::Script(script) => script,
-        }
-    }
-}
-
+// --- Data parsing methods ---
 impl spore_v1::SporeData {
     fn content_type_op(&self) -> Option<String> {
         Some(self.content_type().into_string())
@@ -328,14 +324,10 @@ impl spore_v1::SporeData {
 impl spore_v1::Bytes {
     #[allow(clippy::wrong_self_convention)]
     pub fn into_string(&self) -> String {
-        let res = String::from_utf8(self.raw_data().to_vec());
-        match res {
-            Ok(s) => s,
-            Err(e) => {
-                error!("into_string error: {e:?}");
-                String::new()
-            }
-        }
+        String::from_utf8(self.raw_data().to_vec()).unwrap_or_else(|e| {
+            error!("into_string failed for bytes {:?}: {e:?}", self.raw_data());
+            String::new()
+        })
     }
 }
 
@@ -365,101 +357,105 @@ impl spore_v1::ClusterData {
     }
 }
 
-fn to_timestamp(timestamp: u64) -> chrono::NaiveDateTime {
-    chrono::DateTime::from_timestamp_millis(timestamp as i64)
-        .expect("Invalid timestamp")
-        .naive_utc()
-}
-
-pub fn upsert_address(
-    address: &action::AddressUnion,
-    network: utils::network::NetworkType,
-    op_sender: mpsc::UnboundedSender<Operations>,
-) -> anyhow::Result<String> {
-    let Some(address_id) = address.to_string(network) else {
-        return Err(anyhow::anyhow!(
-            "Failed to convert script to address string. Script bytes: {:?}, Network: {:?}",
-            address.script().as_bytes(),
-            network
-        ));
-    };
-
-    let script = address.script();
-    // Insert address
-    let address = addresses::ActiveModel {
-        id: Set(address_id.clone()),
-        script_code_hash: Set(script.code_hash().raw_data().to_vec()),
-        script_hash_type: Set(script.hash_type().as_bytes().get_u8() as i16),
-        script_args: Set(script.args().raw_data().to_vec()),
-    };
-
-    op_sender.send(Operations::UpsertAddress(address))?;
-
-    Ok(address_id)
-}
-
-fn upsert_spores(
-    data: Data,
-    network: utils::network::NetworkType,
+// Upsert Spore or Cluster state based on output data
+fn upsert_spore_or_cluster(
+    data: OutputData,
+    network: NetworkType,
+    block_number: u64,
+    tx_hash: &H256,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    use entity::{clusters, spores};
+    let now_naive = to_timestamp_naive(timestamp); // Use helper
 
-    let now = to_timestamp(timestamp);
-
-    let Data {
-        id,
-        type_id,
-        to,
+    let OutputData {
+        id, // Spore or Cluster ID
+        type_id_script,
+        to_address_script,
         variant,
+        output_index,
     } = data;
-    let type_id = upsert_address(&type_id, network, op_sender.clone())?;
-    let to = upsert_address(&to, network, op_sender.clone())?;
+
+    // Upsert addresses involved and get their string IDs
+    let type_address_id = upsert_address(
+        // Use helper
+        &type_id_script,
+        network,
+        block_number,
+        tx_hash,
+        timestamp,
+        op_sender.clone(),
+    )?;
+    let owner_address_id = upsert_address(
+        // Use helper
+        &to_address_script, // Use the 'to' address as the owner
+        network,
+        block_number,
+        tx_hash,
+        timestamp,
+        op_sender.clone(),
+    )?;
+
+    let block_num_i64 = block_number as i64;
+    let tx_hash_vec = tx_hash.0.to_vec();
+    let output_idx_i32 = output_index as i32;
 
     match variant {
         DataVariant::Spore(spore_data) => {
             let model = spores::ActiveModel {
-                id: Set(id),
-                owner_address: Set(Some(to)),
+                spore_id: Set(id),
+                owner_address_id: Set(Some(owner_address_id)),
+                type_address_id: Set(type_address_id),
                 content_type: Set(spore_data.content_type_op()),
                 content: Set(spore_data.content_op()),
                 cluster_id: Set(spore_data.cluster_id_op()),
                 is_burned: Set(false),
-                created_at: Set(now),
-                updated_at: Set(now),
-                type_id: Set(type_id),
+                created_at_block_number: Set(block_num_i64),
+                created_at_tx_hash: Set(tx_hash_vec.clone()),
+                created_at_output_index: Set(output_idx_i32),
+                created_at_timestamp: Set(now_naive),
+                last_updated_at_block_number: Set(block_num_i64), // Initially same
+                last_updated_at_tx_hash: Set(tx_hash_vec),        // Initially same
+                last_updated_at_timestamp: Set(now_naive),        // Initially same
             };
             op_sender.send(Operations::UpsertSpores(model))?;
         }
         DataVariant::ClusterV2(cluster_data) => {
             let model = clusters::ActiveModel {
-                id: Set(id),
-                owner_address: Set(Some(to)),
+                cluster_id: Set(id),
+                owner_address_id: Set(Some(owner_address_id)),
+                type_address_id: Set(type_address_id),
                 cluster_name: Set(cluster_data.name_op()),
                 cluster_description: Set(cluster_data.description_op()),
                 mutant_id: Set(cluster_data.mutant_id_op()),
                 is_burned: Set(false),
-                created_at: Set(now),
-                updated_at: Set(now),
-                type_id: Set(type_id),
+                created_at_block_number: Set(block_num_i64),
+                created_at_tx_hash: Set(tx_hash_vec.clone()),
+                created_at_output_index: Set(output_idx_i32),
+                created_at_timestamp: Set(now_naive),
+                last_updated_at_block_number: Set(block_num_i64),
+                last_updated_at_tx_hash: Set(tx_hash_vec),
+                last_updated_at_timestamp: Set(now_naive),
             };
-
             op_sender.send(Operations::UpsertCluster(model))?;
         }
         DataVariant::ClusterV1(cluster_data) => {
             let model = clusters::ActiveModel {
-                id: Set(id),
-                owner_address: Set(Some(to)),
+                cluster_id: Set(id),
+                owner_address_id: Set(Some(owner_address_id)),
+                type_address_id: Set(type_address_id),
                 cluster_name: Set(cluster_data.name_op()),
                 cluster_description: Set(cluster_data.description_op()),
-                mutant_id: Set(None),
+                mutant_id: Set(None), // V1 doesn't have mutant_id
                 is_burned: Set(false),
-                created_at: Set(now),
-                updated_at: Set(now),
-                type_id: Set(type_id),
+                created_at_block_number: Set(block_num_i64),
+                created_at_tx_hash: Set(tx_hash_vec.clone()),
+                created_at_output_index: Set(output_idx_i32),
+                created_at_timestamp: Set(now_naive),
+                last_updated_at_block_number: Set(block_num_i64),
+                last_updated_at_tx_hash: Set(tx_hash_vec),
+                last_updated_at_timestamp: Set(now_naive),
             };
-
             op_sender.send(Operations::UpsertCluster(model))?;
         }
     }
@@ -467,68 +463,90 @@ fn upsert_spores(
     Ok(())
 }
 
+// Insert Spore/Cluster action event
 fn insert_action(
-    action: action::SporeActionUnion,
-    tx: H256,
-    network: utils::network::NetworkType,
+    action_union: action::SporeActionUnion,
+    tx_hash: &H256,
+    network: NetworkType,
+    block_number: u64,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    if let Some(from) = action.from_address() {
-        upsert_address(&from, network, op_sender.clone())?;
-    }
+    // Upsert related addresses to ensure they exist before referencing
+    let from_id =
+        action_union.from_address_id(network, block_number, tx_hash, timestamp, op_sender.clone());
+    let to_id =
+        action_union.to_address_id(network, block_number, tx_hash, timestamp, op_sender.clone());
 
-    let action = entity::spore_actions::ActiveModel {
-        tx: Set(tx.0.to_vec()),
-        action_type: Set(action.action_type()),
-        spore_id: Set(action.spore_id()),
-        cluster_id: Set(action.cluster_id()),
-        proxy_id: Set(action.proxy_id()),
-        from_address_id: Set(action.from_address_id(network)),
-        to_address_id: Set(action.to_address_id(network)),
-        data_hash: Set(action.data_hash()),
-        created_at: Set(to_timestamp(timestamp)),
+    // Create the action model
+    let action_model = spore_actions::ActiveModel {
+        tx_hash: Set(tx_hash.0.to_vec()),
+        block_number: Set(block_number as i64),
+        action_type: Set(action_union.action_type()),
+        spore_id: Set(action_union.spore_id()),
+        cluster_id: Set(action_union.cluster_id()),
+        proxy_id: Set(action_union.proxy_id()),
+        from_address_id: Set(from_id),
+        to_address_id: Set(to_id),
+        action_data: Set(action_union.to_action_data_json()), // Store raw hex in JSON
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),     // Use helper
     };
 
-    debug!("insert action: {:?}", action);
+    debug!("insert action: {:?}", action_model);
 
-    op_sender.send(Operations::UpsertActions(action))?;
+    // Send operation
+    op_sender
+        .send(Operations::UpsertActions(action_model))
+        .map_err(|e| anyhow::anyhow!("Failed to send UpsertActions operation: {}", e))?;
 
     Ok(())
 }
 
+// Extract actions from transaction witnesses
 fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::SporeActionUnion> {
+    // Get SighashAll messages from witnesses
     let msgs = tx
         .inner
         .witnesses
-        .par_iter()
+        .par_iter() // Parallel iteration over witnesses
         .filter_map(|witness| {
             WitnessLayoutReader::from_slice(witness.as_bytes())
                 .ok()
                 .and_then(|r| match r.to_enum() {
                     WitnessLayoutUnionReader::SighashAll(s) => Some(s.message().to_entity()),
-                    _ => None,
+                    _ => None, // Ignore other witness types
                 })
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>(); // Collect messages
 
-    debug!("msgs: {msgs:?}");
+    // debug!(
+    //     "Extracted {} SighashAll messages from witnesses for tx {}",
+    //     msgs.len(),
+    //     tx.hash
+    // );
 
-    let spore_action = msgs
-        .par_iter()
+    // Extract actions from messages
+    let spore_actions: Vec<_> = msgs
+        .par_iter() // Parallel iterator over messages
         .map(|msg| {
-            msg.actions().into_iter().filter_map(|action| {
-                action::SporeActionReader::from_slice(&action.data().raw_data())
-                    .ok()
-                    .map(|reader| reader.to_entity().to_enum())
-            })
+            // Sequentially process actions within each message
+            msg.actions()
+                .into_iter()
+                .filter_map(|action| {
+                    action::SporeActionReader::from_slice(&action.data().raw_data())
+                        .ok()
+                        .map(|reader| reader.to_entity().to_enum())
+                })
+                .collect::<Vec<_>>() // Collect actions for this message
         })
-        .flatten_iter()
-        .collect::<Vec<_>>();
+        // Flatten the Vec<Vec<Action>> into a ParallelIterator<Action>
+        .flatten()
+        // Collect all actions into the final Vec
+        .collect();
 
-    debug!("spore_actions: {spore_action:?}");
+    // debug!("Extracted {} spore actions for tx {}", spore_actions.len(), tx.hash);
 
-    spore_action
+    spore_actions
 }
 
 #[cfg(test)]
@@ -548,6 +566,7 @@ mod tests {
         let (sender, mut recver) = mpsc::unbounded_channel();
         index_spore(
             tx,
+            0,
             0,
             utils::network::NetworkType::Testnet,
             sender,

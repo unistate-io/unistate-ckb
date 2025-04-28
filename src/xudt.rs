@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use crate::{
     database::Operations,
-    entity::{token_info, transaction_outputs_status, xudt_cell},
+    entity::{token_info, transaction_outputs_status, xudt_cells},
+    helper::{to_timestamp_naive, upsert_address},
     schemas::{
         action, blockchain,
         xudt_rce::{self, ScriptVec, XudtData},
@@ -79,6 +80,9 @@ fn upsert_xudt(
     network: utils::network::NetworkType,
     tx_hash: H256,
     index: usize,
+    block_number: u64,
+    timestamp: u64,
+    first_seen_tx_hash: &H256,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<String> {
     let Xudt {
@@ -90,127 +94,136 @@ fn upsert_xudt(
         lock_script,
     } = xudt;
 
-    let type_id = crate::spore::upsert_address(
+    let type_address_id = upsert_address(
         &action::AddressUnion::from_json_script(type_script),
         network,
+        block_number,
+        first_seen_tx_hash,
+        timestamp,
         op_sender.clone(),
     )?;
 
-    let lock_id = crate::spore::upsert_address(
+    let lock_address_id = upsert_address(
         &action::AddressUnion::from_json_script(lock_script),
         network,
+        block_number,
+        first_seen_tx_hash,
+        timestamp,
         op_sender.clone(),
     )?;
 
-    let xudt_args = if let Some(args) = xudt_args {
-        let mut address = Vec::new();
+    let xudt_args_json = if let Some(args) = xudt_args {
+        let mut address_ids = Vec::new();
         for arg in args
             .into_iter()
             .map(|arg| action::AddressUnion::Script(action::Script::new_unchecked(arg.as_bytes())))
         {
-            let addr = crate::spore::upsert_address(&arg, network, op_sender.clone())?;
-            address.push(addr);
+            let addr_id = upsert_address(
+                &arg,
+                network,
+                block_number,
+                first_seen_tx_hash,
+                timestamp,
+                op_sender.clone(),
+            )?;
+            address_ids.push(addr_id);
         }
-        Some(address)
+        Some(serde_json::to_value(address_ids)?)
     } else {
         None
     };
 
-    let xudt_data_lock = xudt_data
+    let xudt_data_lock_hash = xudt_data
         .as_ref()
         .map(|data| data.lock().raw_data().to_vec());
 
-    let xudt_data = xudt_data.map(|data| {
-        data.data()
+    let xudt_data_json = xudt_data.map(|data| {
+        let strings = data
+            .data()
             .into_iter()
             .map(|d| String::from_utf8_lossy(&d.raw_data()).to_string())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        serde_json::to_value(strings).unwrap_or(serde_json::Value::Null)
     });
 
-    let xudt_owner_lock_script_hash = owner_lock_script_hash.map(|hash| hash.to_vec());
+    let owner_lock_hash = owner_lock_script_hash.map(|hash| hash.to_vec());
 
-    let xudt_cell = xudt_cell::ActiveModel {
-        transaction_hash: Set(tx_hash.0.to_vec()),
-        transaction_index: Set(index as i32),
-        lock_id: Set(lock_id),
-        type_id: Set(type_id.clone()),
+    let xudt_cell_model = xudt_cells::ActiveModel {
+        tx_hash: Set(tx_hash.0.to_vec()),
+        output_index: Set(index as i32),
+        lock_address_id: Set(lock_address_id),
+        type_address_id: Set(type_address_id.clone()),
         amount: Set(BigDecimal::new(BigInt::from(amount), 0)),
-        xudt_args: Set(xudt_args),
-        xudt_data: Set(xudt_data),
-        xudt_data_lock: Set(xudt_data_lock),
-        xudt_owner_lock_script_hash: Set(xudt_owner_lock_script_hash),
-        is_consumed: Set(false),
+        xudt_extension_args: Set(xudt_args_json),
+        xudt_extension_data: Set(xudt_data_json),
+        xudt_data_lock_hash: Set(xudt_data_lock_hash),
+        owner_lock_hash: Set(owner_lock_hash),
+        block_number: Set(block_number as i64),
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),
     };
 
-    op_sender.send(Operations::UpsertXudt(xudt_cell))?;
+    op_sender.send(Operations::UpsertXudt(xudt_cell_model))?;
 
-    Ok(type_id)
+    Ok(type_address_id)
 }
 
-struct InputOutPoint {
-    input_transaction_hash: H256,
-    input_transaction_index: usize,
-}
-
-impl InputOutPoint {
-    fn new(current_tx_hash: H256, current_tx_index: usize) -> Self {
-        Self {
-            input_transaction_hash: current_tx_hash,
-            input_transaction_index: current_tx_index,
-        }
-    }
-}
-
-fn update_xudt_cell(
+fn update_output_status(
     output_tx_hash: H256,
     output_index: usize,
-    input_outpoint: InputOutPoint,
+    consuming_tx_hash: H256,
+    consuming_input_index: usize,
+    consuming_block_number: u64,
+    consuming_tx_timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    let xudt_cell = transaction_outputs_status::ActiveModel {
-        output_transaction_hash: Set(output_tx_hash.0.to_vec()),
-        output_transaction_index: Set(output_index as i32),
-        consumed_input_transaction_hash: Set(Some(
-            input_outpoint.input_transaction_hash.0.to_vec(),
-        )),
-        consumed_input_transaction_index: Set(Some(input_outpoint.input_transaction_index as i32)),
+    let output_status = transaction_outputs_status::ActiveModel {
+        output_tx_hash: Set(output_tx_hash.0.to_vec()),
+        output_tx_index: Set(output_index as i32),
+        consumed_by_tx_hash: Set(Some(consuming_tx_hash.0.to_vec())),
+        consumed_by_input_index: Set(Some(consuming_input_index as i32)),
+        consuming_block_number: Set(Some(consuming_block_number as i64)),
+        consuming_tx_timestamp: Set(Some(to_timestamp_naive(consuming_tx_timestamp))),
     };
 
-    op_sender.send(Operations::UpdateXudtCell(xudt_cell))?;
+    op_sender.send(Operations::UpdateXudtCell(output_status))?;
 
     Ok(())
 }
 
 fn upsert_token_info(
-    token_info: TokenInfo,
+    token_info_data: TokenInfo,
     tx_hash: H256,
     index: usize,
-    type_id: String,
+    type_address_id: String,
+    block_number: u64,
+    timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
     let TokenInfo {
         decimal,
         name,
         symbol,
-    } = token_info;
+    } = token_info_data;
 
-    let token_info = token_info::ActiveModel {
-        type_id: Set(type_id),
-        transaction_hash: Set(tx_hash.0.to_vec()),
-        transaction_index: Set(index as i32),
+    let token_info_model = token_info::ActiveModel {
+        type_address_id: Set(type_address_id),
+        defining_tx_hash: Set(tx_hash.0.to_vec()),
+        defining_output_index: Set(index as i32),
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
-        inscription_id: Set(None),
+        inscription_address_id: Set(None),
         udt_hash: Set(None),
         expected_supply: Set(None),
         mint_limit: Set(None),
         mint_status: Set(None),
+        block_number: Set(block_number as i64),
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),
     };
 
-    debug!("token info: {token_info:?}");
+    debug!("token info: {:?}", token_info_model);
 
-    op_sender.send(Operations::UpsertTokenInfo(token_info))?;
+    op_sender.send(Operations::UpsertTokenInfo(token_info_model))?;
 
     Ok(())
 }
@@ -233,19 +246,19 @@ fn parse_xudt(
     let xudt_data = XudtData::from_slice(raw_xudt_data).ok();
     debug!("XudtData: {:?}", xudt_data);
 
-    let (raw_onwer_lock_script_hash, raw_xudt_args) = o
+    let (raw_owner_lock_script_hash, raw_xudt_args) = o
         .type_
         .as_ref()
         .and_then(|tp| tp.args.as_bytes().split_at_checked(32))
         .unzip();
     debug!(
         "Raw owner lock script hash: {:?}",
-        raw_onwer_lock_script_hash
+        raw_owner_lock_script_hash
     );
     debug!("Raw Xudt args: {:?}", raw_xudt_args);
 
     let owner_lock_script_hash =
-        raw_onwer_lock_script_hash.map(|raw| std::array::from_fn::<u8, 32, _>(|i| raw[i]));
+        raw_owner_lock_script_hash.map(|raw| std::array::from_fn::<u8, 32, _>(|i| raw[i]));
     debug!("Owner lock script hash: {:?}", owner_lock_script_hash);
 
     let xudt_args = raw_xudt_args.filter(|raw| !raw.is_empty()).and_then(|raw| {
@@ -267,68 +280,68 @@ fn parse_xudt(
                     Some(sv)
                 }
                 Err(e) => {
-                    debug!("Failed to parse script vec: {:?}", e);
-                    unreachable!()
+                    tracing::error!("Failed to parse script vec from XUDT args: {:?}", e);
+                    None
                 }
             },
             0x2 => {
-                let hash = H160(std::array::from_fn::<u8, 20, _>(|i| ext_data[i]));
-                debug!("Hash: {:?}", hash);
-                maps.get(&hash)
-                    .and_then(|witness| witness.raw_extension_data().to_opt())
+                if ext_data.len() >= 20 {
+                    let hash = H160(std::array::from_fn::<u8, 20, _>(|i| ext_data[i]));
+                    debug!("Hash: {:?}", hash);
+                    maps.get(&hash)
+                        .and_then(|witness| witness.raw_extension_data().to_opt())
+                } else {
+                    tracing::error!("Invalid length for extension data hash (flag 0x2)");
+                    None
+                }
             }
             _ => {
-                debug!("Unknown flags!");
-                unreachable!()
+                tracing::error!("Unknown XUDT flags: {}", flags);
+                None
             }
         };
         debug!("Extension data: {:?}", ext_data);
         ext_data
     });
     debug!("Xudt args: {:?}", xudt_args);
-    let xudt = Xudt {
+
+    let type_script = unsafe { o.type_.unwrap_unchecked() };
+
+    Some(Xudt {
         amount,
         xudt_data,
         xudt_args,
         owner_lock_script_hash,
-        type_script: unsafe { o.type_.unwrap_unchecked() },
+        type_script,
         lock_script: o.lock,
-    };
-    Some(xudt)
+    })
 }
 
-pub struct XudtIndexer {
-    txs: Vec<TransactionView>,
+pub struct XudtTxContext {
+    pub tx: TransactionView,
+    pub block_number: u64,
+    pub timestamp: u64,
+}
+
+pub fn index_xudt_transactions(
+    tx_contexts: Vec<XudtTxContext>,
     network: NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
-}
+) -> Result<(), anyhow::Error> {
+    let constants = Constants::from_config(network);
 
-impl XudtIndexer {
-    pub fn new(
-        txs: Vec<TransactionView>,
-        network: NetworkType,
-        op_sender: mpsc::UnboundedSender<Operations>,
-    ) -> Self {
-        Self {
-            txs,
+    tx_contexts.into_par_iter().try_for_each(|ctx| {
+        index_xudt(
+            ctx.tx,
             network,
-            op_sender,
-        }
-    }
+            constants,
+            ctx.block_number,
+            ctx.timestamp,
+            op_sender.clone(),
+        )
+    })?;
 
-    pub fn index(self) -> Result<(), anyhow::Error> {
-        let Self {
-            txs,
-            network,
-            op_sender,
-        } = self;
-        let constants = Constants::from_config(network);
-
-        txs.into_par_iter()
-            .try_for_each(|tx| index_xudt(tx, network, constants, op_sender.clone()))?;
-
-        Ok(())
-    }
+    Ok(())
 }
 
 enum XudtParseResult {
@@ -364,9 +377,11 @@ fn index_xudt(
     tx: TransactionView,
     network: NetworkType,
     constants: Constants,
+    block_number: u64,
+    timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    debug!("Indexing transaction: {:?}", tx);
+    debug!("Indexing transaction: {}", tx.hash);
 
     let xudt_witness_input = process_witnesses::<true>(&tx);
     debug!("XudtWitnessInput: {:?}", xudt_witness_input);
@@ -377,19 +392,19 @@ fn index_xudt(
     let token_data = tx
         .inner
         .outputs
+        .clone()
         .into_par_iter()
         .zip(tx.inner.outputs_data.into_par_iter())
         .enumerate()
         .filter_map(|(idx, p)| {
-            debug!("Parsing output: {:?}", p);
-            debug!("Output type: {:?}", p.0.type_);
+            debug!("Parsing output index {}: type={:?}", idx, p.0.type_);
             if p.0
                 .type_
                 .as_ref()
                 .map(|t| constants.is_xudt_type(t))
                 .unwrap_or(false)
             {
-                debug!("Output is XUDT type");
+                debug!("Output {} is XUDT type", idx);
                 let xudt = parse_xudt(p, &xudt_witness_input);
                 xudt.map(|xudt| (XudtParseResult::Xudt(xudt), idx))
             } else if p
@@ -399,42 +414,63 @@ fn index_xudt(
                 .map(|t| constants.is_unique_type(t))
                 .unwrap_or(false)
             {
-                debug!("Output is UNIQUE type");
+                debug!("Output {} is UNIQUE type", idx);
                 let token_info = decode_token_info_bytes(p.1.as_bytes());
                 match token_info {
                     Ok(info) => Some((XudtParseResult::XudtInfo(info), idx)),
                     Err(err) => {
-                        debug!("Decode token info {:?} error: {err:?}", p.1.as_bytes());
+                        debug!(
+                            "Decode token info for output {} ({:?}) error: {err:?}",
+                            idx,
+                            p.1.as_bytes()
+                        );
                         None
                     }
                 }
             } else {
-                debug!("Output is not XUDT type");
+                debug!("Output {} is not XUDT or UNIQUE type", idx);
                 None
             }
         })
         .try_fold_with(
             TokenData::new(),
-            |mut token_data, (xudt, index)| -> anyhow::Result<TokenData> {
-                match xudt {
+            |mut token_data, (parse_result, index)| -> anyhow::Result<TokenData> {
+                match parse_result {
                     XudtParseResult::XudtInfo(info) => {
                         token_data.info = Some((info, index));
                     }
                     XudtParseResult::Xudt(xudt) => {
-                        let xudt_type_id =
-                            upsert_xudt(xudt, network, tx.hash.clone(), index, op_sender.clone())?;
-                        token_data.token_id = Some(xudt_type_id);
+                        let xudt_type_address_id = upsert_xudt(
+                            xudt,
+                            network,
+                            tx.hash.clone(),
+                            index,
+                            block_number,
+                            timestamp,
+                            &tx.hash,
+                            op_sender.clone(),
+                        )?;
+                        token_data.token_id = Some(xudt_type_address_id);
                     }
                 }
-                debug!("token data: {token_data:?}");
-
+                debug!("token data after index {}: {:?}", index, token_data);
                 Ok(token_data)
             },
         )
         .try_reduce(TokenData::new, |pre, new| Ok(pre.merge(new)))?;
 
+    debug!("Final TokenData for tx {}: {:?}", tx.hash, token_data);
+
     if let Some(((info, index), token_id)) = token_data.zip() {
-        upsert_token_info(info, tx.hash.clone(), index, token_id, op_sender.clone())?;
+        upsert_token_info(
+            info,
+            tx.hash.clone(),
+            index,
+            token_id,
+            block_number,
+            timestamp,
+            op_sender.clone(),
+        )?;
     }
 
     tx.inner.inputs.into_par_iter().enumerate().try_for_each(
@@ -442,10 +478,13 @@ fn index_xudt(
             let previous_tx_hash = input.previous_output.tx_hash.clone();
             let previous_tx_index = input.previous_output.index.value() as usize;
 
-            update_xudt_cell(
+            update_output_status(
                 previous_tx_hash,
                 previous_tx_index,
-                InputOutPoint::new(tx.hash.clone(), input_index),
+                tx.hash.clone(),
+                input_index,
+                block_number,
+                timestamp,
                 op_sender.clone(),
             )?;
             Ok(())
@@ -463,7 +502,6 @@ mod tests {
 
     use crate::xudt::index_xudt;
     use constants::Constants;
-
     #[test]
     #[tracing_test::traced_test]
     fn debug_index_xudt() {
@@ -473,7 +511,15 @@ mod tests {
         debug!("is xudt: {is_xudt}");
 
         let (sender, mut recver) = mpsc::unbounded_channel();
-        index_xudt(tx, utils::network::NetworkType::Mainnet, constants, sender).unwrap();
+        index_xudt(
+            tx,
+            utils::network::NetworkType::Mainnet,
+            constants,
+            0, // block_number
+            0, // timestamp
+            sender,
+        )
+        .unwrap();
         while let Some(op) = recver.blocking_recv() {
             debug!("op: {op:?}");
         }
@@ -484,52 +530,17 @@ mod tests {
     {
       "cell_deps": [
         {
-          "dep_type": "code",
+          "dep_type": "dep_group",
           "out_point": {
-            "index": "0x0",
-            "tx_hash": "0x283e09c4e2e1ee40790e38565555a730a67287680fb0a720cbf46f575e8cc0ca"
+            "index": "0x1",
+            "tx_hash": "0x71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c"
           }
         },
         {
           "dep_type": "code",
           "out_point": {
-            "index": "0x0",
-            "tx_hash": "0xc2a187e18ceb9fc30fdcec5a7f3c547e79a4ddde930bc646cfee278319c00943"
-          }
-        },
-        {
-          "dep_type": "code",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0x5292c77c62f108e3a33e54ed3bdcc4457a9d7d88be0c6ef3c1811f473394e2f7"
-          }
-        },
-        {
-          "dep_type": "code",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0x44b2bbddee6a13e688b61589cb8af16a1d25e58fa7e0b732cea3f1d32683beb3"
-          }
-        },
-        {
-          "dep_type": "code",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0x7dfd96165a48fc0f346ad207491e8309f22c76f73f9b0940253471119706b5cb"
-          }
-        },
-        {
-          "dep_type": "code",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0xc3f90640cd458b62b0cf20f20d995c8e72e9931a04185d76aadb27eb89c2ad1a"
-          }
-        },
-        {
-          "dep_type": "code",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0xc07844ce21b38e4b071dd0e1ee3b0e27afd8d7532491327f39b786343f558ab7"
+            "index": "0x2",
+            "tx_hash": "0x10d63a996157d32c01078058000052674ca58d15f921bec7f1dcdac2160eb66b"
           }
         },
         {
@@ -538,108 +549,61 @@ mod tests {
             "index": "0x0",
             "tx_hash": "0xf6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d"
           }
-        },
-        {
-          "dep_type": "dep_group",
-          "out_point": {
-            "index": "0x0",
-            "tx_hash": "0x71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c"
-          }
         }
       ],
-      "hash": "0x80f7a95aadbcc0a4d6142cf2c805a3077b47495db1b254239345937c0a7bb8f8",
+      "hash": "0x8954d5b572cefdb6f71952ae4f67e97aa447e25681b1c0bf90bb6627cebfe5ce",
       "header_deps": [],
       "inputs": [
         {
           "previous_output": {
             "index": "0x0",
-            "tx_hash": "0x0857d51c90ecfc03732daa74c2faf4abdbb72168106acbb12576d811aa0224ae"
+            "tx_hash": "0xd34df609d1d8c53f15224b64bafa19a9c8faae8ff958c7b854fa36a64e79215e"
           },
           "since": "0x0"
         },
         {
           "previous_output": {
-            "index": "0x2",
-            "tx_hash": "0x45ba30fd4f857f38a6121c8793634e1bd17156530922ed2b0b41ba579857ea9d"
+            "index": "0x0",
+            "tx_hash": "0x6a02536a099046d0c8e1509140451649d7b0c85181d45e8aa1712723e7d2dc7d"
           },
           "since": "0x0"
         },
         {
           "previous_output": {
-            "index": "0x3",
-            "tx_hash": "0x45ba30fd4f857f38a6121c8793634e1bd17156530922ed2b0b41ba579857ea9d"
-          },
-          "since": "0x0"
-        },
-        {
-          "previous_output": {
-            "index": "0x4",
-            "tx_hash": "0x45ba30fd4f857f38a6121c8793634e1bd17156530922ed2b0b41ba579857ea9d"
-          },
-          "since": "0x0"
-        },
-        {
-          "previous_output": {
-            "index": "0x5",
-            "tx_hash": "0x45ba30fd4f857f38a6121c8793634e1bd17156530922ed2b0b41ba579857ea9d"
+            "index": "0x1",
+            "tx_hash": "0x6a02536a099046d0c8e1509140451649d7b0c85181d45e8aa1712723e7d2dc7d"
           },
           "since": "0x0"
         }
       ],
       "outputs": [
         {
-          "capacity": "0x34e62ce00",
+          "capacity": "0x4a817c800",
           "lock": {
-            "args": "0xcf61b0c750e420671586467716d0c74c4d6aaabc",
-            "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+            "args": "0xe333ae79a46b69931fb98d06a6ccc802364bc728",
+            "code_hash": "0x5c5069eb0857efc65e1bca0c07df34c31663b3622fd3876c876320fc9634e2a8",
             "hash_type": "type"
           },
           "type": {
-            "args": "0x2ae639d6233f9b15545573b8e78f38ff7aa6c7bf8ef6460bf1f12d0a76c09c4e",
-            "code_hash": "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
-            "hash_type": "data1"
+            "args": "0xeda3f8814610a35340f424405c469efb426b3987bd26b9da27f77272f394fec6",
+            "code_hash": "0x00000000000000000000000000000000000000000000000000545950455f4944",
+            "hash_type": "type"
           }
         },
         {
-          "capacity": "0x1a13b8600",
+          "capacity": "0x4a817c800",
           "lock": {
-            "args": "0xcf61b0c750e420671586467716d0c74c4d6aaabc",
-            "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-            "hash_type": "type"
+            "args": "0x256d995c234c11788f16c8ac57ed08aae432a1aa629fbf3011811e52f6ae814f",
+            "code_hash": "0x2df53b592db3ae3685b7787adcfef0332a611edb83ca3feca435809964c3aff2",
+            "hash_type": "data1"
           },
           "type": null
         },
         {
-          "capacity": "0x5a8649300",
+          "capacity": "0x360447100",
           "lock": {
-            "args": "0x",
-            "code_hash": "0x7ef6e226ca9a3514ac76759f0b1550e70c9aa10aff89111fedf2c9d800d256f7",
-            "hash_type": "type"
-          },
-          "type": {
-            "args": "0xa049295e9f32444b590bacc6d723e4e2aeedbbc089b71f83f0f75200e1acb3aa",
-            "code_hash": "0xc70a8b00526419826023bcf196852eecdc87406cdff7366234f6387265413c98",
-            "hash_type": "type"
-          }
-        },
-        {
-          "capacity": "0x395e95a00",
-          "lock": {
-            "args": "0x4b008713c85efd503cbfac7dff137657349afe043bab9abd667a9395f33ea795",
-            "code_hash": "0x393df3359e33f85010cd65a3c4a4268f72d95ec6b049781a916c680b31ea9a88",
-            "hash_type": "type"
-          },
-          "type": {
-            "args": "0x2ae639d6233f9b15545573b8e78f38ff7aa6c7bf8ef6460bf1f12d0a76c09c4e",
-            "code_hash": "0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95",
-            "hash_type": "data1"
-          }
-        },
-        {
-          "capacity": "0x395e95a00",
-          "lock": {
-            "args": "0x4b008713c85efd503cbfac7dff137657349afe043bab9abd667a9395f33ea795",
-            "code_hash": "0x393df3359e33f85010cd65a3c4a4268f72d95ec6b049781a916c680b31ea9a88",
+            "args": "0x0001dd93812b8c0bcaf8296530ae02a6c9b8326fe84e",
+            "code_hash": "0xd00c84f0ec8fd441c38bc3f87a371f547190f2fcff88e642bc5bf54b9e318323",
             "hash_type": "type"
           },
           "type": {
@@ -647,32 +611,18 @@ mod tests {
             "code_hash": "0xbfa35a9c38a676682b65ade8f02be164d48632281477e36f8dc2f41f79e56bfc",
             "hash_type": "type"
           }
-        },
-        {
-          "capacity": "0x1747f8ae4f",
-          "lock": {
-            "args": "0x42e11d5e294aa6901d30f0d4fb50fb30222b7f54",
-            "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-            "hash_type": "type"
-          },
-          "type": null
         }
       ],
       "outputs_data": [
-        "0x90f1c861020000000000000000000000",
         "0x",
-        "0x1e5303000000000000178fb47b597a56d48b549226aff59f750b4784250c7f40f781b64ef090a8a0a78b41b40cae16000000000000000000007f3fba3fb8d6e000176f7e1ae22e8cd02841dec6a8341dc69aeef46387a20664f9fe28c30200000000000000000000000a2f695f7e0000000000000000000000e2a7c226000000000000000000000000",
-        "0x8b41b40cae1600000000000000000000",
-        "0xf9fe28c3020000000000000000000000",
-        "0x4b008713c85efd503cbfac7dff137657349afe043bab9abd667a9395f33ea795"
+        "0x",
+        "0x7c10bf77000000000000000000000000"
       ],
       "version": "0x0",
       "witnesses": [
+        "0xd600000010000000d6000000d6000000c200000000000203fb23f3eed8d935ddaed30c95d3f81af61b0064726e6d407958bea4b1fd8452541b5ff619e3ea87ff42cf9a6900b2e59f4dd67e51c9c68939170e4323c5f0d0013ad0130170187ee4a00dd9cada7128d171b1e37581056c37f9d75c3070aacd19d67206cdfbaec8001b19f3fa8d8520fb7ff691f487609dedbc848c6a00f3ac3800b311142f53c9fbc3820485c7f3976c038cd3c117d50c84f400bcf5ca535ae234ee417594cc99058861861ebe997f022a83fa03b6d681728667df13b800",
         "0x",
-        "0x",
-        "0x",
-        "0x",
-        "0x5500000010000000550000005500000041000000174fd817f108b18e54a6ebe8592744b72909efc8100198bbfa39bf354e9c18dc3fdcc8c228d66e40f212ca6e2bf4f9f163e0c99b50b9a3f89d8d5e222efb659f01"
+        "0x"
       ]
     }"#;
 }

@@ -3,15 +3,16 @@ use sea_orm::{
     ActiveModelTrait, DbConn, DbErr, EntityTrait as _, TransactionTrait, sea_query::OnConflict,
 };
 use tokio::sync::{mpsc, oneshot};
+use tracing::error;
 
 use crate::entity::{
     addresses, block_height, clusters, rgbpp_locks, rgbpp_unlocks, spore_actions, spores,
-    token_info, transaction_outputs_status, xudt_cell,
+    token_info, transaction_outputs_status, xudt_cells,
 };
 
 pub struct DatabaseProcessor {
     pub recv: mpsc::UnboundedReceiver<Operations>,
-    pub height: u64,
+    pub next_height: u64,
     pub commited: oneshot::Receiver<()>,
     pub db: DbConn,
 }
@@ -20,7 +21,7 @@ pub struct DatabaseProcessor {
 pub enum Operations {
     UpdateXudtCell(transaction_outputs_status::ActiveModel),
     UpsertTokenInfo(token_info::ActiveModel),
-    UpsertXudt(xudt_cell::ActiveModel),
+    UpsertXudt(xudt_cells::ActiveModel),
     UpsertAddress(addresses::ActiveModel),
     UpsertCluster(clusters::ActiveModel),
     UpsertSpores(spores::ActiveModel),
@@ -93,45 +94,45 @@ macro_rules! define_upsert_functions {
 
 define_upsert_functions! {
     upsert_many_xudt => (
-        xudt_cell,
+        xudt_cells,
         define_conflict!(
-            xudt_cell::Column::TransactionHash,
-            xudt_cell::Column::TransactionIndex
+            xudt_cells::Column::TxHash,
+            xudt_cells::Column::OutputIndex
         )
     ),
 
     upsert_many_info => (
         token_info,
         define_conflict!(
-            token_info::Column::TypeId
+            token_info::Column::TypeAddressId
         )
     ),
 
     upsert_many_status => (
         transaction_outputs_status,
         define_conflict!(
-            transaction_outputs_status::Column::OutputTransactionHash,
-            transaction_outputs_status::Column::OutputTransactionIndex
+            transaction_outputs_status::Column::OutputTxHash,
+            transaction_outputs_status::Column::OutputTxIndex
         )
     ),
 
     upsert_many_addresses => (
         addresses,
         define_conflict!(
-            addresses::Column::Id
+            addresses::Column::AddressId
         )
     ),
 
     upsert_many_clusters => (
         clusters,
         define_conflict!(
-            clusters::Column::Id => [
-                clusters::Column::OwnerAddress,
+            clusters::Column::ClusterId => [
+                clusters::Column::OwnerAddressId,
                 clusters::Column::ClusterName,
                 clusters::Column::ClusterDescription,
                 clusters::Column::MutantId,
                 clusters::Column::IsBurned,
-                clusters::Column::UpdatedAt
+                clusters::Column::LastUpdatedAtTimestamp
             ]
         ),
         merge_clusters
@@ -140,13 +141,13 @@ define_upsert_functions! {
     upsert_many_spores => (
         spores,
         define_conflict!(
-            spores::Column::Id => [
-                spores::Column::OwnerAddress,
+            spores::Column::SporeId => [
+                spores::Column::OwnerAddressId,
                 spores::Column::ContentType,
                 spores::Column::Content,
                 spores::Column::ClusterId,
                 spores::Column::IsBurned,
-                spores::Column::UpdatedAt
+                spores::Column::LastUpdatedAtTimestamp
             ]
         ),
         merge_spores
@@ -155,27 +156,27 @@ define_upsert_functions! {
     upsert_many_actions => (
         spore_actions,
         define_conflict!(
-            spore_actions::Column::Tx
+            spore_actions::Column::TxHash
         )
     ),
 
     upsert_many_locks => (
         rgbpp_locks,
         define_conflict!(
-            rgbpp_locks::Column::LockId
+            rgbpp_locks::Column::LockArgsHash
         )
     ),
 
     upsert_many_unlocks => (
         rgbpp_unlocks,
         define_conflict!(
-            rgbpp_unlocks::Column::UnlockId
+            rgbpp_unlocks::Column::UnlockWitnessHash
         )
     ),
 }
 
 macro_rules! process_operations {
-    ($commited:expr, $height:expr, $db:expr, $recv:expr, $( $stage:expr => { $( $variant:ident => ($vec:ident, $upsert_fn:ident) ),* } ),*) => {
+    ($commited:expr, $next_height:expr, $db:expr, $recv:expr, $( $stage:expr => { $( $variant:ident => ($vec:ident, $upsert_fn:ident) ),* } ),*) => {
         {
             use std::time::Instant;
             use futures::StreamExt;
@@ -201,7 +202,7 @@ macro_rules! process_operations {
             let recv_duration = recv_start.elapsed();
             tracing::debug!("Receiving {sum} Operations took: {:?}", recv_duration);
 
-            $commited.await?;
+            $commited.await.map_err(|_| anyhow::anyhow!("Commit signal sender dropped, processing likely failed."))?;
 
             let handle_start = Instant::now();
 
@@ -237,34 +238,35 @@ macro_rules! process_operations {
                 tracing::debug!("Stage {} took: {:?}", $stage, stage_duration);
             )*
 
-            // 更新区块高度
+            let committed_height = $next_height.saturating_sub(1);
             block_height::ActiveModel {
                 id: sea_orm::Set(1),
-                height: sea_orm::Set($height as i64),
+                height: sea_orm::Set(committed_height as i64),
             }
             .update(&txn)
             .await?;
 
-            tracing::debug!("committing {} ...", $height);
+            tracing::debug!("Committing database transaction up to block {}...", committed_height);
             txn.commit().await?;
 
             let db_duration = Instant::now().duration_since(handle_start);
             tracing::info!("Processed a total of {sum} database operations. Execution time: {:?}", db_duration);
-        }
+            Ok(())
+        }.map_err(|e: anyhow::Error| e)
     };
 }
 
 impl DatabaseProcessor {
     pub fn new(
         db: DbConn,
-        height: u64,
+        next_height: u64,
     ) -> (Self, mpsc::UnboundedSender<Operations>, oneshot::Sender<()>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = oneshot::channel();
         (
             Self {
                 recv: rx,
-                height,
+                next_height,
                 db,
                 commited: commit_rx,
             },
@@ -277,13 +279,13 @@ impl DatabaseProcessor {
         let Self {
             mut recv,
             db,
-            height,
+            next_height,
             commited,
         } = self;
 
-        process_operations! {
+        let result = process_operations! {
             commited,
-            height,
+            next_height,
             db,
             recv,
             0 => {
@@ -305,29 +307,43 @@ impl DatabaseProcessor {
             }
         };
 
-        tracing::info!("committed {height}!");
-
-        Ok(())
+        match result {
+            Ok(_) => {
+                let committed_height = next_height.saturating_sub(1);
+                tracing::info!(
+                    "Successfully committed database changes up to block {committed_height}!"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let failed_at_height = next_height.saturating_sub(1);
+                error!(
+                    "Database processing/commit failed for batch ending at {}: {:?}",
+                    failed_at_height, e
+                );
+                Err(e)
+            }
+        }
     }
 }
 
 macro_rules! merge_models {
-    ($fn_name:ident, $model:ident) => {
+    ($fn_name:ident, $model:ident, $id_field:ident, $timestamp_field:ident) => {
         fn $fn_name(items: Vec<$model::ActiveModel>) -> Vec<$model::ActiveModel> {
             use sea_orm::ActiveValue::Set;
 
             let unique_items = dashmap::DashMap::<Vec<u8>, $model::ActiveModel>::new();
 
             items.into_par_iter().for_each(|item| {
-                if let Set(ref id) = item.id {
+                if let Set(ref id) = item.$id_field {
                     if !unique_items.contains_key(id)
                         || unique_items
                             .get(id)
                             .unwrap()
-                            .updated_at
+                            .$timestamp_field
                             .try_as_ref()
                             .unwrap()
-                            < item.updated_at.try_as_ref().unwrap()
+                            < item.$timestamp_field.try_as_ref().unwrap()
                     {
                         unique_items.insert(id.clone(), item);
                     }
@@ -340,5 +356,10 @@ macro_rules! merge_models {
     };
 }
 
-merge_models!(merge_clusters, clusters);
-merge_models!(merge_spores, spores);
+merge_models!(
+    merge_clusters,
+    clusters,
+    cluster_id,
+    last_updated_at_timestamp
+);
+merge_models!(merge_spores, spores, spore_id, last_updated_at_timestamp);

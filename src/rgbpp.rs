@@ -1,4 +1,4 @@
-use ckb_jsonrpc_types::TransactionView;
+use ckb_jsonrpc_types::{CellOutput, Script, TransactionView};
 use ckb_types::H256;
 use fetcher::get_fetcher;
 use futures::future::try_join_all;
@@ -9,34 +9,52 @@ use molecule::{
 use rayon::prelude::{IntoParallelRefIterator as _, ParallelIterator as _};
 use sea_orm::Set;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, error};
 
 use crate::{
     database::Operations,
+    helper::script_hash_type_to_byte,
     schemas::{blockchain, rgbpp},
 };
 
+fn to_timestamp_naive(timestamp: u64) -> chrono::NaiveDateTime {
+    chrono::DateTime::from_timestamp_millis(timestamp as i64)
+        .expect("Invalid timestamp")
+        .naive_utc()
+}
+
+pub struct RgbppTxContext {
+    pub tx: TransactionView,
+    pub block_number: u64,
+    pub timestamp: u64,
+}
+
 pub async fn run_rgbpp_indexing_logic(
-    txs: Vec<TransactionView>,
+    tx_contexts: Vec<RgbppTxContext>,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
     let mut tasks = Vec::new();
-    for tx in txs {
-        let op_sender = op_sender.clone();
-
+    for ctx in tx_contexts {
+        let op_sender_clone = op_sender.clone();
         tasks.push(tokio::spawn(async move {
-            index_rgbpp_lock(tx, op_sender).await
+            index_rgbpp_lock(ctx.tx, ctx.block_number, ctx.timestamp, op_sender_clone).await
         }));
     }
-    try_join_all(tasks).await?;
+    try_join_all(tasks)
+        .await?
+        .into_iter()
+        .try_for_each(|res| res)?;
     Ok(())
 }
 
 fn process_witnesses(
     tx: &TransactionView,
+    block_number: u64,
+    timestamp: u64,
     op_sender: &mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    tx.inner
+    let results: Vec<Result<(), anyhow::Error>> = tx
+        .inner
         .witnesses
         .par_iter()
         .filter_map(|witness| blockchain::WitnessArgsReader::from_slice(witness.as_bytes()).ok())
@@ -51,67 +69,143 @@ fn process_witnesses(
                         .map(|unlock| unlock.to_entity())
                 })
         })
-        .try_for_each(|unlock| upsert_rgbpp_unlock(op_sender.clone(), &unlock, tx.hash.clone()))
+        .map(|unlock| {
+            upsert_rgbpp_unlock(
+                op_sender.clone(),
+                &unlock,
+                tx.hash.clone(),
+                block_number,
+                timestamp,
+            )
+        })
+        .collect();
+
+    for result in results {
+        result?;
+    }
+    Ok(())
 }
 
 fn process_outputs(
-    outputs: &[ckb_jsonrpc_types::CellOutput],
+    outputs: &[(CellOutput, usize)],
+    block_number: u64,
+    timestamp: u64,
     op_sender: &mpsc::UnboundedSender<Operations>,
     tx_hash: &H256,
 ) -> anyhow::Result<()> {
-    outputs
+    let results: Vec<Result<(), anyhow::Error>> = outputs
         .par_iter()
-        .filter_map(|output| {
+        .filter_map(|(output, index)| {
             rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
                 .ok()
-                .map(|reader| reader.to_entity())
+                .map(|reader| (reader.to_entity(), output.lock.clone(), *index))
         })
-        .try_for_each(|lock| upsert_rgbpp_lock(op_sender.clone(), &lock, tx_hash.clone()))
+        .map(|(lock, lock_script, index)| {
+            upsert_rgbpp_lock(
+                op_sender.clone(),
+                &lock,
+                tx_hash.clone(),
+                lock_script,
+                index,
+                block_number,
+                timestamp,
+            )
+        })
+        .collect();
+
+    for result in results {
+        result?;
+    }
+    Ok(())
 }
 
-fn index_rgbpp_lock(
+async fn index_rgbpp_lock(
     tx: TransactionView,
+    block_number: u64,
+    timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
-) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
-    async move {
-        debug!("tx: {}", hex::encode(tx.hash.as_bytes()));
+) -> anyhow::Result<()> {
+    debug!("Indexing RGBPP for tx: {}", tx.hash);
 
-        process_witnesses(&tx, &op_sender)?;
+    process_witnesses(&tx, block_number, timestamp, &op_sender)?;
 
-        // Process inputs by fetching and then processing their outputs
-        let pre_outputs = get_fetcher()?.get_outputs(tx.inner.inputs).await?;
-        process_outputs(&pre_outputs, &op_sender, &tx.hash)?;
+    let prev_outputs_res = get_fetcher()?.get_outputs(tx.inner.inputs).await;
+    match prev_outputs_res {
+        Ok(prev_outputs) => {
+            let prev_outputs_with_indices: Vec<(CellOutput, usize)> = prev_outputs
+                .into_iter()
+                .enumerate()
+                .map(|(i, output)| (output, i))
+                .collect();
 
-        process_outputs(&tx.inner.outputs, &op_sender, &tx.hash)?;
-
-        Ok(())
+            process_outputs(
+                &prev_outputs_with_indices,
+                block_number,
+                timestamp,
+                &op_sender,
+                &tx.hash,
+            )?;
+        }
+        Err(e) => {
+            error!(
+                "Failed to fetch previous outputs for tx {}: {:?}. Skipping input processing.",
+                tx.hash, e
+            );
+        }
     }
+
+    let current_outputs_with_indices: Vec<(CellOutput, usize)> = tx
+        .inner
+        .outputs
+        .into_iter()
+        .enumerate()
+        .map(|(i, output)| (output, i))
+        .collect();
+    process_outputs(
+        &current_outputs_with_indices,
+        block_number,
+        timestamp,
+        &op_sender,
+        &tx.hash,
+    )?;
+
+    Ok(())
 }
 
-impl rgbpp::RGBPPLock {
-    fn lock_id(&self) -> Vec<u8> {
-        blockchain::Bytes::new_unchecked(self.as_bytes())
-            .raw_data()
-            .to_vec()
-    }
+fn calc_lock_args_hash(lock_args: &[u8]) -> Vec<u8> {
+    let hash = ckb_hash::blake2b_256(lock_args);
+    hash.to_vec()
 }
 
 fn upsert_rgbpp_lock(
     op_sender: mpsc::UnboundedSender<Operations>,
     rgbpp_lock: &rgbpp::RGBPPLock,
-    tx: H256,
+    tx_hash_val: H256,
+    lock_script: Script,
+    output_index_val: usize,
+    block_number: u64,
+    timestamp: u64,
 ) -> anyhow::Result<()> {
     use crate::entity::rgbpp_locks;
 
-    let lock_id = rgbpp_lock.lock_id();
+    let lock_args_bytes = lock_script.args.as_bytes();
+    let lock_args_hash_vec = calc_lock_args_hash(lock_args_bytes);
+
     let mut txid = rgbpp_lock.btc_txid().as_bytes().to_vec();
     txid.reverse();
-    // Insert rgbpp lock
+
+    let hash_type_val = script_hash_type_to_byte(lock_script.hash_type);
+    let lock_script_hash_type_val = hash_type_val.as_bytes()[0] as i16;
+
     let model = rgbpp_locks::ActiveModel {
-        lock_id: Set(lock_id),
-        out_index: Set(rgbpp_lock.out_index().raw_data().get_u32_le() as i32),
+        lock_args_hash: Set(lock_args_hash_vec),
+        tx_hash: Set(tx_hash_val.0.to_vec()),
+        output_index: Set(output_index_val as i32),
+        lock_script_code_hash: Set(lock_script.code_hash.0.to_vec()),
+        lock_script_hash_type: Set(lock_script_hash_type_val),
         btc_txid: Set(txid),
-        tx: Set(tx.0.to_vec()),
+        block_number: Set(block_number as i64),
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),
     };
 
     op_sender.send(Operations::UpsertLock(model))?;
@@ -119,29 +213,32 @@ fn upsert_rgbpp_lock(
     Ok(())
 }
 
-impl rgbpp::RGBPPUnlock {
-    fn unlock_id(&self) -> Vec<u8> {
-        let hash = ckb_hash::blake2b_256(self.as_bytes());
-        hash.to_vec()
-    }
+fn calc_unlock_witness_hash(unlock_witness: &rgbpp::RGBPPUnlock) -> Vec<u8> {
+    let hash = ckb_hash::blake2b_256(unlock_witness.as_bytes());
+    hash.to_vec()
 }
 
 fn upsert_rgbpp_unlock(
     op_sender: mpsc::UnboundedSender<Operations>,
     rgbpp_unlock: &rgbpp::RGBPPUnlock,
-    tx: H256,
+    tx_hash_val: H256,
+    block_number: u64,
+    timestamp: u64,
 ) -> anyhow::Result<()> {
     use crate::entity::rgbpp_unlocks;
 
-    let unlock_id = rgbpp_unlock.unlock_id();
+    let unlock_witness_hash_vec = calc_unlock_witness_hash(rgbpp_unlock);
+
     let model = rgbpp_unlocks::ActiveModel {
-        unlock_id: Set(unlock_id),
+        unlock_witness_hash: Set(unlock_witness_hash_vec),
+        tx_hash: Set(tx_hash_val.0.to_vec()),
         version: Set(rgbpp_unlock.version().raw_data().get_u16_le() as i16),
         input_len: Set(rgbpp_unlock.extra_data().input_len().as_bytes().get_u8() as i16),
         output_len: Set(rgbpp_unlock.extra_data().output_len().as_bytes().get_u8() as i16),
         btc_tx: Set(rgbpp_unlock.btc_tx().as_bytes().to_vec()),
         btc_tx_proof: Set(rgbpp_unlock.btc_tx_proof().as_bytes().to_vec()),
-        tx: Set(tx.0.to_vec()),
+        block_number: Set(block_number as i64),
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),
     };
 
     op_sender.send(Operations::UpsertUnlock(model))?;

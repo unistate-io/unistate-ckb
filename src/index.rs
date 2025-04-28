@@ -13,7 +13,6 @@ use fetcher::{get_db, get_fetcher};
 use futures::future::try_join_all;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sea_orm::DbConn;
-use spore::SporeTx;
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::{self, JoinHandle},
@@ -22,9 +21,38 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use utils::network::NetworkType;
 
-use crate::{categorization, config, database, inscription, rgbpp, spore, xudt};
+use crate::categorization::categorize_transaction;
+use crate::inscription::InscriptionTxContext;
+use crate::rgbpp::RgbppTxContext;
+use crate::spore::SporeTx;
+use crate::xudt::XudtTxContext;
+use crate::{config, database, inscription, rgbpp, spore, xudt};
 
-use categorization::{CategorizedTxs, categorize_transaction};
+pub struct CategorizedTxContexts {
+    pub spore_txs: Vec<SporeTx>,
+    pub xudt_txs: Vec<XudtTxContext>,
+    pub rgbpp_txs: Vec<RgbppTxContext>,
+    pub inscription_txs: Vec<InscriptionTxContext>,
+}
+
+impl CategorizedTxContexts {
+    pub fn new() -> Self {
+        Self {
+            spore_txs: Vec::new(),
+            xudt_txs: Vec::new(),
+            rgbpp_txs: Vec::new(),
+            inscription_txs: Vec::new(),
+        }
+    }
+
+    pub fn merge(mut self, other: Self) -> Self {
+        self.spore_txs.extend(other.spore_txs);
+        self.xudt_txs.extend(other.xudt_txs);
+        self.rgbpp_txs.extend(other.rgbpp_txs);
+        self.inscription_txs.extend(other.inscription_txs);
+        self
+    }
+}
 
 const MAX_CONCURRENT_BATCHES: usize = 10;
 
@@ -37,7 +65,7 @@ pub struct Indexer {
     db: DbConn,
     constants: Constants,
     network: NetworkType,
-    db_commit_handles: VecDeque<JoinHandle<Result<()>>>,
+    db_commit_handles: VecDeque<(u64, JoinHandle<Result<()>>)>,
     inflight_semaphore: Arc<Semaphore>,
 }
 
@@ -67,33 +95,61 @@ impl Indexer {
 
     pub async fn run(&mut self) -> Result<()> {
         self.update_target_height().await?;
+        info!(
+            "Initial height: {}, Target height: {}",
+            self.height, self.target_height
+        );
 
         loop {
-            while let Some(handle) = self.db_commit_handles.front() {
-                if handle.is_finished() {
-                    let finished_handle = self.db_commit_handles.pop_front().unwrap();
-                    match finished_handle.await {
-                        Ok(Ok(())) => {
-                            debug!("Background DB commit task finished successfully.")
-                        }
-                        Ok(Err(db_err)) => {
-                            error!(
-                                "Background DB commit task failed: {:?}. Halting indexer.",
-                                db_err
-                            );
-                            return Err(db_err).context("Background DB commit task failed");
-                        }
-                        Err(join_err) => {
-                            error!(
-                                "Error joining background DB task: {:?}. Halting indexer.",
-                                join_err
-                            );
-                            return Err(join_err).context("Failed to join background DB task");
-                        }
-                    }
-                } else {
+            let mut last_successfully_committed_height = self.height;
+
+            while let Some((_, handle)) = self.db_commit_handles.front() {
+                if !handle.is_finished() {
                     break;
                 }
+
+                let (finished_batch_next_height, finished_handle) =
+                    self.db_commit_handles.pop_front().unwrap();
+
+                match finished_handle.await {
+                    Ok(Ok(())) => {
+                        debug!(
+                            "DB commit task for batch ending at {} finished successfully.",
+                            finished_batch_next_height - 1
+                        );
+                        last_successfully_committed_height = finished_batch_next_height;
+                    }
+                    Ok(Err(db_err)) => {
+                        error!(
+                            "DB commit task for batch ending at {} failed: {:?}. Halting indexer.",
+                            finished_batch_next_height - 1,
+                            db_err
+                        );
+                        return Err(db_err).context(format!(
+                            "DB commit task failed for batch ending {}",
+                            finished_batch_next_height - 1
+                        ));
+                    }
+                    Err(join_err) => {
+                        error!(
+                            "Error joining DB commit task for batch ending at {}: {:?}. Halting indexer.",
+                            finished_batch_next_height - 1,
+                            join_err
+                        );
+                        return Err(join_err).context(format!(
+                            "Failed to join DB commit task for batch ending {}",
+                            finished_batch_next_height - 1
+                        ));
+                    }
+                }
+            }
+
+            if last_successfully_committed_height > self.height {
+                debug!(
+                    "Updating indexer height from {} to {}",
+                    self.height, last_successfully_committed_height
+                );
+                self.height = last_successfully_committed_height;
             }
 
             self.batch_size =
@@ -105,10 +161,20 @@ impl Indexer {
                         "Commit pipeline full ({} pending). Waiting for oldest commit task to complete...",
                         self.db_commit_handles.len()
                     );
-                    if let Some(oldest_handle) = self.db_commit_handles.pop_front() {
+                    if let Some((oldest_batch_next_height, oldest_handle)) =
+                        self.db_commit_handles.pop_front()
+                    {
                         match oldest_handle.await {
                             Ok(Ok(())) => {
                                 info!("Oldest DB commit task finished successfully while waiting.");
+                                last_successfully_committed_height = oldest_batch_next_height;
+                                if last_successfully_committed_height > self.height {
+                                    debug!(
+                                        "Updating indexer height from {} to {} while waiting",
+                                        self.height, last_successfully_committed_height
+                                    );
+                                    self.height = last_successfully_committed_height;
+                                }
                             }
                             Ok(Err(db_err)) => {
                                 error!(
@@ -129,8 +195,15 @@ impl Indexer {
                         }
                     } else {
                         warn!("Commit handle queue was unexpectedly empty while waiting.");
+                        time::sleep(Duration::from_millis(100)).await;
                         break;
                     }
+                }
+
+                if self.db_commit_handles.len() >= MAX_CONCURRENT_BATCHES {
+                    warn!("Pipeline still full after waiting, skipping dispatch this cycle.");
+                    time::sleep(Duration::from_millis(500)).await;
+                    continue;
                 }
 
                 let permit = match self.inflight_semaphore.clone().acquire_owned().await {
@@ -144,6 +217,7 @@ impl Indexer {
                 let batch_start_height = self.height;
                 let batch_end_height = batch_start_height + self.batch_size;
                 let inclusive_end_height = batch_end_height.saturating_sub(1);
+                let next_batch_start_height = inclusive_end_height + 1;
 
                 info!(
                     "Dispatching batch: blocks {}..={} ({} items) | Current Height: {} | Target Height: {} | Inflight: {}/{}",
@@ -157,7 +231,7 @@ impl Indexer {
                 );
 
                 let (database_processor, op_sender, commit_signal_sender) =
-                    DatabaseProcessor::new(self.db.clone(), inclusive_end_height);
+                    DatabaseProcessor::new(self.db.clone(), next_batch_start_height);
                 let db_processor_task_handle = task::spawn(database_processor.handle());
 
                 let constants_clone = self.constants;
@@ -177,28 +251,45 @@ impl Indexer {
                     )
                     .await;
 
-                    if let Err(e) = result {
+                    if let Err(e) = &result {
                         error!(
                             "Error processing batch {}..={}: {:?}",
                             batch_start_height, inclusive_end_height, e
                         );
                     }
+                    result
                 });
 
                 let db_commit_waiter_handle = task::spawn(async move {
-                    if let Err(join_err) = processing_task_handle.await {
-                        error!(
-                            "Processing task for batch {}..={} panicked or was cancelled: {:?}",
-                            batch_start_height, inclusive_end_height, join_err
-                        );
-                        drop(db_processor_task_handle);
-                        return Err(anyhow::Error::from(join_err).context(format!(
-                            "Processing task join error for batch {}..={}",
-                            batch_start_height, inclusive_end_height
-                        )));
-                    }
+                    match processing_task_handle.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(processing_err)) => {
+                            error!(
+                                "Processing task for batch {}..={} failed: {:?}",
+                                batch_start_height, inclusive_end_height, processing_err
+                            );
+                            drop(db_processor_task_handle);
+                            return Err(processing_err).context(format!(
+                                "Processing task failed for batch {}..={}",
+                                batch_start_height, inclusive_end_height
+                            ));
+                        }
+                        Err(join_err) => {
+                            error!(
+                                "Processing task for batch {}..={} panicked or was cancelled: {:?}",
+                                batch_start_height, inclusive_end_height, join_err
+                            );
+                            drop(db_processor_task_handle);
+                            return Err(anyhow::Error::from(join_err).context(format!(
+                                "Processing task join error for batch {}..={}",
+                                batch_start_height, inclusive_end_height
+                            )));
+                        }
+                    };
+
                     let db_result = db_processor_task_handle.await;
                     drop(permit);
+
                     match db_result {
                         Ok(Ok(())) => Ok(()),
                         Ok(Err(db_err)) => Err(db_err).context(format!(
@@ -212,8 +303,8 @@ impl Indexer {
                     }
                 });
 
-                self.db_commit_handles.push_back(db_commit_waiter_handle);
-                self.update_height();
+                self.db_commit_handles
+                    .push_back((next_batch_start_height, db_commit_waiter_handle));
             } else {
                 if !self.db_commit_handles.is_empty() {
                     info!(
@@ -221,9 +312,14 @@ impl Indexer {
                         self.target_height,
                         self.db_commit_handles.len()
                     );
-                    while let Some(handle) = self.db_commit_handles.pop_front() {
+                    while let Some((finished_batch_next_height, handle)) =
+                        self.db_commit_handles.pop_front()
+                    {
                         match handle.await {
-                            Ok(Ok(())) => info!("Final batch DB commit finished successfully."),
+                            Ok(Ok(())) => {
+                                info!("Final batch DB commit finished successfully.");
+                                last_successfully_committed_height = finished_batch_next_height;
+                            }
                             Ok(Err(db_err)) => {
                                 error!(
                                     "Final batch DB commit failed: {:?}. Halting indexer.",
@@ -241,6 +337,13 @@ impl Indexer {
                         }
                     }
                     info!("All pending DB commits finished.");
+                    if last_successfully_committed_height > self.height {
+                        info!(
+                            "Final height update from {} to {}",
+                            self.height, last_successfully_committed_height
+                        );
+                        self.height = last_successfully_committed_height;
+                    }
                 } else {
                     info!(
                         "Caught up to target height {}. No pending commits. Waiting for new blocks...",
@@ -260,10 +363,6 @@ impl Indexer {
                 }
             }
         }
-    }
-
-    fn update_height(&mut self) {
-        self.height += self.batch_size;
     }
 
     async fn update_target_height(&mut self) -> Result<()> {
@@ -302,7 +401,7 @@ async fn process_batch_inner(
     commit_tx: oneshot::Sender<()>,
     processing_log_start: u64,
     processing_log_end: u64,
-) -> Result<()> {
+) -> Result<(), anyhow::Error> {
     let _sender_guard = SenderGuard(op_sender.clone());
 
     info!(
@@ -310,7 +409,7 @@ async fn process_batch_inner(
         processing_log_start, processing_log_end
     );
 
-    let (categorized_txs, txs_to_cache) =
+    let (categorized_data, txs_to_cache) =
         fetch_and_categorize_transactions(batch_start_height, batch_end_height, &constants)
             .await
             .with_context(|| {
@@ -325,7 +424,7 @@ async fn process_batch_inner(
             let cache_result = task::spawn_blocking(move || -> Result<(), fetcher::Error> {
                 for tx in txs_to_cache {
                     let tx_hash = tx.hash.clone();
-                    if let Err(e) = fetcher::cache_transaction(db, tx) {
+                    if let Err(e) = fetcher::cache_transaction(db, &tx) {
                         warn!(
                             "Failed to cache transaction {} in batch {} - {}: {}",
                             tx_hash, processing_log_start, processing_log_end, e
@@ -354,78 +453,97 @@ async fn process_batch_inner(
     let rgbpp_sender = _sender_guard.0.clone();
     let inscription_sender = _sender_guard.0.clone();
 
-    let spore_txs = categorized_txs.spore_txs;
-    let xudt_txs = categorized_txs.xudt_txs;
-    let rgbpp_txs = categorized_txs.rgbpp_txs;
-    let inscription_txs = categorized_txs.inscription_txs;
+    let spore_tx_contexts = categorized_data.spore_txs;
+    let xudt_tx_contexts = categorized_data.xudt_txs;
+    let rgbpp_tx_contexts = categorized_data.rgbpp_txs;
+    let inscription_tx_contexts = categorized_data.inscription_txs;
 
-    if !spore_txs.is_empty() {
+    if !spore_tx_contexts.is_empty() {
         info!(
             "Spawning Spore indexer task for batch {} - {} ({} txs)",
             processing_log_start,
             processing_log_end,
-            spore_txs.len()
+            spore_tx_contexts.len()
         );
         let constants_clone = constants;
         let network_clone = network;
         let handle = task::spawn_blocking(move || {
-            spore::SporeIndexer::new(spore_txs, network_clone, constants_clone, spore_sender)
-                .index()
+            spore::index_spores(
+                spore_tx_contexts,
+                network_clone,
+                constants_clone,
+                spore_sender,
+            )
         });
         sub_task_futures.push(Box::pin(async move {
-            handle.await.map_err(anyhow::Error::from)?
+            match handle.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e).context("Spore indexer task failed"),
+                Err(e) => Err(anyhow::Error::from(e)).context("Spore indexer task join error"),
+            }
         }));
     }
-    if !xudt_txs.is_empty() {
+    if !xudt_tx_contexts.is_empty() {
         info!(
             "Spawning XUDT indexer task for batch {} - {} ({} txs)",
             processing_log_start,
             processing_log_end,
-            xudt_txs.len()
+            xudt_tx_contexts.len()
         );
         let network_clone = network;
         let handle = task::spawn_blocking(move || {
-            xudt::XudtIndexer::new(xudt_txs, network_clone, xudt_sender).index()
+            xudt::index_xudt_transactions(xudt_tx_contexts, network_clone, xudt_sender)
         });
         sub_task_futures.push(Box::pin(async move {
-            handle.await.map_err(anyhow::Error::from)?
+            match handle.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e).context("XUDT indexer task failed"),
+                Err(e) => Err(anyhow::Error::from(e)).context("XUDT indexer task join error"),
+            }
         }));
     }
-    if !rgbpp_txs.is_empty() {
+    if !rgbpp_tx_contexts.is_empty() {
         info!(
             "Spawning RGB++ indexer task for batch {} - {} ({} txs)",
             processing_log_start,
             processing_log_end,
-            rgbpp_txs.len()
+            rgbpp_tx_contexts.len(),
         );
-
-        let rgbpp_future = task::spawn(rgbpp::run_rgbpp_indexing_logic(rgbpp_txs, rgbpp_sender));
-
+        let rgbpp_future = task::spawn(rgbpp::run_rgbpp_indexing_logic(
+            rgbpp_tx_contexts,
+            rgbpp_sender,
+        ));
         sub_task_futures.push(Box::pin(async move {
-            rgbpp_future
-                .await
-                .map_err(anyhow::Error::from)?
-                .context("RGB++ indexer task failed")
+            match rgbpp_future.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e).context("RGB++ indexer task failed"),
+                Err(e) => Err(anyhow::Error::from(e)).context("RGB++ indexer task join error"),
+            }
         }));
     }
-    if !inscription_txs.is_empty() {
+    if !inscription_tx_contexts.is_empty() {
         info!(
             "Spawning Inscription indexer task for batch {} - {} ({} txs)",
             processing_log_start,
             processing_log_end,
-            inscription_txs.len()
+            inscription_tx_contexts.len()
         );
         let network_clone = network;
         let handle = task::spawn_blocking(move || {
-            inscription::InscriptionInfoIndexer::new(
-                inscription_txs,
+            inscription::index_inscription_info_batch(
+                inscription_tx_contexts,
                 network_clone,
                 inscription_sender,
             )
-            .index()
         });
         sub_task_futures.push(Box::pin(async move {
-            handle.await.map_err(anyhow::Error::from)?
+            match handle.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(e).context("Inscription indexer task failed"),
+                Err(e) => {
+                    Err(anyhow::Error::from(e)).context("Inscription indexer task join error")
+                }
+            }
         }));
     }
 
@@ -459,7 +577,7 @@ async fn process_batch_inner(
             processing_log_end
         );
         anyhow::anyhow!(
-            "DB processor receiver dropped for batch ending {}",
+            "DB processor receiver dropped before commit signal for batch ending {}",
             processing_log_end
         )
     })?;
@@ -485,7 +603,7 @@ async fn fetch_and_categorize_transactions(
     start_number: u64,
     end_number: u64,
     constants: &Constants,
-) -> Result<(CategorizedTxs, Vec<TransactionView>)> {
+) -> Result<(CategorizedTxContexts, Vec<TransactionView>)> {
     let count = end_number.saturating_sub(start_number);
     let inclusive_end_number = end_number.saturating_sub(1);
 
@@ -494,7 +612,7 @@ async fn fetch_and_categorize_transactions(
             "Fetch/Categorize: Skipping empty range {}..{}",
             start_number, end_number
         );
-        return Ok((CategorizedTxs::new(), Vec::new()));
+        return Ok((CategorizedTxContexts::new(), Vec::new()));
     }
 
     info!(
@@ -520,13 +638,25 @@ async fn fetch_and_categorize_transactions(
             end_number,
             count
         );
+        if block_views.is_empty() && count > 0 {
+            error!(
+                "Fetched 0 blocks for non-empty range {}..{}. Cannot proceed.",
+                start_number, end_number
+            );
+            return Err(anyhow::anyhow!(
+                "Failed to fetch any blocks in range {}..{}",
+                start_number,
+                end_number
+            ));
+        }
         if block_views.is_empty() {
-            return Ok((CategorizedTxs::new(), Vec::new()));
+            return Ok((CategorizedTxContexts::new(), Vec::new()));
         }
     }
 
     let results = block_views
         .into_par_iter()
+        .flatten()
         .filter_map(|block| {
             let block_num = block.header.inner.number.value();
             if block_num < start_number || block_num >= end_number {
@@ -538,36 +668,51 @@ async fn fetch_and_categorize_transactions(
             }
 
             let timestamp = block.header.inner.timestamp.value();
-            let mut block_categorized_txs = CategorizedTxs::new();
+            let mut block_categorized_data = CategorizedTxContexts::new();
             let mut block_txs_to_cache = Vec::with_capacity(block.transactions.len());
 
             for tx in block.transactions {
                 let categorizes = categorize_transaction(&tx, constants);
 
                 if categorizes.is_spore {
-                    block_categorized_txs.spore_txs.push(SporeTx {
+                    block_categorized_data.spore_txs.push(SporeTx {
                         tx: tx.clone(),
                         timestamp,
+                        block_number: block_num,
                     });
                 }
                 if categorizes.is_xudt {
-                    block_categorized_txs.xudt_txs.push(tx.clone());
+                    block_categorized_data.xudt_txs.push(XudtTxContext {
+                        tx: tx.clone(),
+                        timestamp,
+                        block_number: block_num,
+                    });
                 }
                 if categorizes.is_rgbpp {
-                    block_categorized_txs.rgbpp_txs.push(tx.clone());
+                    block_categorized_data.rgbpp_txs.push(RgbppTxContext {
+                        tx: tx.clone(),
+                        timestamp,
+                        block_number: block_num,
+                    });
                 }
                 if categorizes.is_inscription {
-                    block_categorized_txs.inscription_txs.push(tx.clone());
+                    block_categorized_data
+                        .inscription_txs
+                        .push(InscriptionTxContext {
+                            tx: tx.clone(),
+                            timestamp,
+                            block_number: block_num,
+                        });
                 }
 
                 if get_db().is_ok() {
                     block_txs_to_cache.push(tx);
                 }
             }
-            Some((block_categorized_txs, block_txs_to_cache))
+            Some((block_categorized_data, block_txs_to_cache))
         })
         .reduce(
-            || (CategorizedTxs::new(), Vec::new()),
+            || (CategorizedTxContexts::new(), Vec::new()),
             |mut a, b| {
                 a.0 = a.0.merge(b.0);
                 a.1.extend(b.1);

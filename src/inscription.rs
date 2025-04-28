@@ -1,7 +1,9 @@
 use bigdecimal::{BigDecimal, num_bigint::BigInt};
 use ckb_jsonrpc_types::{Script, TransactionView};
-use ckb_types::prelude::{Builder as _, Entity as _};
-use ckb_types::{H256, packed};
+use ckb_types::{
+    H256, packed,
+    prelude::{Builder as _, Entity as _, Pack as _},
+};
 use molecule::prelude::Entity as _;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator as _};
 use sea_orm::Set;
@@ -11,46 +13,49 @@ use tokio::sync::mpsc;
 use tracing::debug;
 use utils::network::NetworkType;
 
-use crate::{database::Operations, entity::token_info, schemas::action, spore::upsert_address};
+use crate::{
+    database::Operations,
+    entity::token_info,
+    helper::{script_hash_type_to_byte, upsert_address},
+    schemas::action,
+};
 
 use constants::Constants;
 
-pub struct InscriptionInfoIndexer {
-    txs: Vec<TransactionView>,
+fn to_timestamp_naive(timestamp: u64) -> chrono::NaiveDateTime {
+    chrono::DateTime::from_timestamp_millis(timestamp as i64)
+        .expect("Invalid timestamp")
+        .naive_utc()
+}
+
+pub struct InscriptionTxContext {
+    pub tx: TransactionView,
+    pub block_number: u64,
+    pub timestamp: u64,
+}
+
+pub fn index_inscription_info_batch(
+    tx_contexts: Vec<InscriptionTxContext>,
     network: NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
+) -> Result<(), anyhow::Error> {
+    let constants = Constants::from_config(network);
+
+    tx_contexts.into_par_iter().try_for_each(|ctx| {
+        index_inscription_info(
+            ctx.tx,
+            network,
+            constants,
+            ctx.block_number,
+            ctx.timestamp,
+            op_sender.clone(),
+        )
+    })?;
+
+    Ok(())
 }
 
-impl InscriptionInfoIndexer {
-    pub fn new(
-        txs: Vec<TransactionView>,
-        network: NetworkType,
-        op_sender: mpsc::UnboundedSender<Operations>,
-    ) -> Self {
-        Self {
-            txs,
-            network,
-            op_sender,
-        }
-    }
-
-    pub fn index(self) -> Result<(), anyhow::Error> {
-        let Self {
-            txs,
-            network,
-            op_sender,
-        } = self;
-
-        let constants = Constants::from_config(network);
-
-        txs.into_par_iter()
-            .try_for_each(|tx| index_inscription_info(tx, network, constants, op_sender.clone()))?;
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct InscriptionInfo {
     decimal: u8,
     name: String,
@@ -65,35 +70,54 @@ fn index_inscription_info(
     tx: TransactionView,
     network: NetworkType,
     constants: Constants,
+    block_number: u64,
+    timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
+    let tx_hash = tx.hash.clone();
+
     tx.inner
         .outputs
         .into_par_iter()
         .zip(tx.inner.outputs_data.into_par_iter())
         .enumerate()
         .try_for_each(|(idx, (output, data))| -> anyhow::Result<()> {
-            if let Some(tp) = output.type_ {
-                let inscription_info = constants.inscription_info_type_script();
-                if tp.code_hash.eq(&inscription_info.code_hash)
-                    && tp.hash_type.eq(&inscription_info.hash_type)
+            if let Some(tp) = &output.type_ {
+                let inscription_info_script_config = constants.inscription_info_type_script();
+                let packed_type_script: packed::Script = tp.clone().into();
+
+                if packed_type_script.code_hash()
+                    == packed::Byte32::from_slice(
+                        inscription_info_script_config.code_hash.as_bytes(),
+                    )
+                    .unwrap()
+                    && packed_type_script.hash_type()
+                        == script_hash_type_to_byte(inscription_info_script_config.hash_type)
                 {
                     let info = deserialize_inscription_info(data.as_bytes())?;
-                    let type_id = upsert_address(
-                        &action::AddressUnion::Script(action::Script::new_unchecked(
-                            packed::Script::from(tp).as_bytes(),
-                        )),
+                    let type_script_union = action::AddressUnion::Script(
+                        action::Script::new_unchecked(packed_type_script.as_bytes()),
+                    );
+
+                    let type_address_id = upsert_address(
+                        &type_script_union,
                         network,
+                        block_number,
+                        &tx_hash,
+                        timestamp,
                         op_sender.clone(),
                     )?;
+
                     upsert_inscription_info(UpsertInscriptionInfoParams {
                         inscription_info: info,
-                        inscription_info_script: inscription_info,
+                        inscription_info_script: tp.clone(),
                         network,
                         constants,
-                        tx_hash: tx.hash.clone(),
+                        tx_hash: tx_hash.clone(),
                         index: idx,
-                        type_id,
+                        type_address_id,
+                        block_number,
+                        timestamp,
                         op_sender: op_sender.clone(),
                     })?;
                 }
@@ -112,7 +136,9 @@ struct UpsertInscriptionInfoParams {
     constants: Constants,
     tx_hash: H256,
     index: usize,
-    type_id: String,
+    type_address_id: String,
+    block_number: u64,
+    timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 }
 
@@ -124,7 +150,9 @@ fn upsert_inscription_info(params: UpsertInscriptionInfoParams) -> anyhow::Resul
         constants,
         tx_hash,
         index,
-        type_id,
+        type_address_id,
+        block_number,
+        timestamp,
         op_sender,
     } = params;
 
@@ -138,17 +166,24 @@ fn upsert_inscription_info(params: UpsertInscriptionInfoParams) -> anyhow::Resul
         mint_status,
     } = inscription_info;
 
-    let xudt_type_script = action::AddressUnion::Script(action::Script::new_unchecked(
-        calc_xudt_type_script(inscription_info_script, constants).as_bytes(),
+    let calculated_xudt_script = calc_xudt_type_script(inscription_info_script.clone(), constants);
+    let xudt_type_script_union = action::AddressUnion::Script(action::Script::new_unchecked(
+        calculated_xudt_script.as_bytes(),
     ));
 
-    let inscription_id = upsert_address(&xudt_type_script, network, op_sender.clone())?;
+    let inscription_address_id = upsert_address(
+        &xudt_type_script_union,
+        network,
+        block_number,
+        &tx_hash,
+        timestamp,
+        op_sender.clone(),
+    )?;
 
-    let token_info = token_info::ActiveModel {
-        type_id: Set(type_id),
-        inscription_id: Set(Some(inscription_id)),
-        transaction_hash: Set(tx_hash.0.to_vec()),
-        transaction_index: Set(index as i32),
+    let token_info_model = token_info::ActiveModel {
+        type_address_id: Set(type_address_id),
+        defining_tx_hash: Set(tx_hash.0.to_vec()),
+        defining_output_index: Set(index as i32),
         decimal: Set(decimal as i16),
         name: Set(name),
         symbol: Set(symbol),
@@ -156,46 +191,77 @@ fn upsert_inscription_info(params: UpsertInscriptionInfoParams) -> anyhow::Resul
         expected_supply: Set(Some(BigDecimal::new(BigInt::from(max_supply), 0))),
         mint_limit: Set(Some(BigDecimal::new(BigInt::from(mint_limit), 0))),
         mint_status: Set(Some(mint_status as i16)),
+        inscription_address_id: Set(Some(inscription_address_id)),
+        block_number: Set(block_number as i64),
+        tx_timestamp: Set(to_timestamp_naive(timestamp)),
     };
 
-    debug!("token info: {token_info:?}");
+    debug!("token info: {:?}", token_info_model);
 
-    op_sender.send(Operations::UpsertTokenInfo(token_info))?;
+    op_sender.send(Operations::UpsertTokenInfo(token_info_model))?;
 
     Ok(())
 }
 
 #[derive(Error, Debug)]
 pub enum InscriptionError {
-    #[error("Invalid UTF-8 in name")]
-    InvalidUtf8InName,
-    #[error("Invalid xudt_hash length")]
-    InvalidXudtHashLength,
-    #[error("Invalid max_supply")]
-    InvalidMaxSupply,
+    #[error("Invalid UTF-8 in name or symbol")]
+    InvalidUtf8,
+    #[error("Invalid xudt_hash length (expected 32, got {0})")]
+    InvalidXudtHashLength(usize),
+    #[error("Insufficient data for max_supply (expected 16 bytes)")]
+    InsufficientDataForMaxSupply,
+    #[error("Insufficient data for mint_limit (expected 16 bytes)")]
+    InsufficientDataForMintLimit,
+    #[error("Insufficient data for name length")]
+    InsufficientDataForNameLength,
+    #[error("Insufficient data for name content (expected {expected}, got {got})")]
+    InsufficientDataForNameContent { expected: usize, got: usize },
+    #[error("Data reading error: {0}")]
+    DataReadError(String),
 }
 
 fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, InscriptionError> {
     let mut cursor = 0;
 
+    if data.len() < 3 {
+        return Err(InscriptionError::DataReadError(
+            "Data too short for basic structure".to_string(),
+        ));
+    }
+
     let decimal = data[cursor];
     cursor += 1;
 
-    let (name, new_cursor) = read_string(&data[cursor..])?;
-    cursor += new_cursor;
+    let (name, name_bytes_read) = read_string(&data[cursor..]).map_err(|e| match e {
+        InscriptionError::InvalidUtf8 => e,
+        _ => InscriptionError::DataReadError(format!("Failed reading name: {}", e)),
+    })?;
+    cursor += name_bytes_read;
 
-    let (symbol, new_cursor) = read_string(&data[cursor..])?;
-    cursor += new_cursor;
+    let (symbol, symbol_bytes_read) = read_string(&data[cursor..]).map_err(|e| match e {
+        InscriptionError::InvalidUtf8 => e,
+        _ => InscriptionError::DataReadError(format!("Failed reading symbol: {}", e)),
+    })?;
+    cursor += symbol_bytes_read;
 
-    let xudt_hash: [u8; 32] = data[cursor..cursor + 32]
+    if data.len() < cursor + 65 {
+        return Err(InscriptionError::DataReadError(format!(
+            "Insufficient data remaining after symbol (need 65, have {})",
+            data.len() - cursor
+        )));
+    }
+
+    let xudt_hash_slice = &data[cursor..cursor + 32];
+    let xudt_hash: [u8; 32] = xudt_hash_slice
         .try_into()
-        .map_err(|_| InscriptionError::InvalidXudtHashLength)?;
+        .map_err(|_| InscriptionError::InvalidXudtHashLength(xudt_hash_slice.len()))?;
     cursor += 32;
 
-    let max_supply = read_u128(&data[cursor..], decimal)?;
+    let max_supply = read_u128(&data[cursor..cursor + 16], decimal, "max_supply")?;
     cursor += 16;
 
-    let mint_limit = read_u128(&data[cursor..], decimal)?;
+    let mint_limit = read_u128(&data[cursor..cursor + 16], decimal, "mint_limit")?;
     cursor += 16;
 
     let mint_status = data[cursor];
@@ -212,19 +278,46 @@ fn deserialize_inscription_info(data: &[u8]) -> Result<InscriptionInfo, Inscript
 }
 
 fn read_string(data: &[u8]) -> Result<(String, usize), InscriptionError> {
+    if data.is_empty() {
+        return Err(InscriptionError::InsufficientDataForNameLength);
+    }
     let len = data[0] as usize;
-    let string = std::str::from_utf8(&data[1..1 + len])
-        .map_err(|_| InscriptionError::InvalidUtf8InName)?
+    if data.len() < 1 + len {
+        return Err(InscriptionError::InsufficientDataForNameContent {
+            expected: len,
+            got: data.len() - 1,
+        });
+    }
+
+    let string_slice = &data[1..1 + len];
+    let string = std::str::from_utf8(string_slice)
+        .map_err(|_| InscriptionError::InvalidUtf8)?
         .to_string();
     Ok((string, len + 1))
 }
 
-fn read_u128(data: &[u8], decimal: u8) -> Result<u128, InscriptionError> {
-    let value = u128::from_le_bytes(
-        data[..16]
-            .try_into()
-            .map_err(|_| InscriptionError::InvalidMaxSupply)?,
-    ) / 10u128.pow(decimal as u32);
+fn read_u128(data: &[u8], decimal: u8, field_name: &str) -> Result<u128, InscriptionError> {
+    if data.len() < 16 {
+        return Err(match field_name {
+            "max_supply" => InscriptionError::InsufficientDataForMaxSupply,
+            "mint_limit" => InscriptionError::InsufficientDataForMintLimit,
+            _ => InscriptionError::DataReadError(format!(
+                "Insufficient data for u128 field '{}'",
+                field_name
+            )),
+        });
+    }
+    let bytes: [u8; 16] = data[..16].try_into().unwrap();
+    let raw_value = u128::from_le_bytes(bytes);
+
+    let divisor = 10u128.pow(decimal as u32);
+    if divisor == 0 {
+        return Err(InscriptionError::DataReadError(format!(
+            "Invalid decimal value {} leads to zero divisor",
+            decimal
+        )));
+    }
+    let value = raw_value / divisor;
     Ok(value)
 }
 
@@ -232,8 +325,8 @@ fn calc_xudt_type_script(
     inscription_info_script: impl Into<packed::Script>,
     constants: Constants,
 ) -> packed::Script {
-    let inscription_info_script = inscription_info_script.into();
-    let owner_script = generate_owner_script(&inscription_info_script, constants);
+    let packed_inscription_info_script: packed::Script = inscription_info_script.into();
+    let owner_script = generate_owner_script(&packed_inscription_info_script, constants);
 
     packed::Script::from(constants.inscription_xudt_type_script())
         .as_builder()
@@ -252,16 +345,8 @@ fn generate_owner_script(
 }
 
 fn generate_args(script: &packed::Script) -> packed::Bytes {
-    packed::Bytes::new_builder()
-        .set(
-            script
-                .calc_script_hash()
-                .raw_data()
-                .into_iter()
-                .map(|s| packed::Byte::new(s))
-                .collect(),
-        )
-        .build()
+    let script_hash = script.calc_script_hash();
+    script_hash.as_bytes().pack()
 }
 
 #[cfg(test)]
