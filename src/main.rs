@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
 async fn run_with_watchdog(indexer: &mut index::Indexer) -> Result<()> {
     let mut last_error: Option<anyhow::Error> = None;
     let mut last_failure_time: Option<time::Instant> = None;
+    let mut retry_count = 0;
 
     loop {
         match indexer.run().await {
@@ -91,13 +92,20 @@ async fn run_with_watchdog(indexer: &mut index::Indexer) -> Result<()> {
                     if last_error.to_string() == e.to_string() {
                         if let Some(last_failure_time) = last_failure_time {
                             if last_failure_time.elapsed() < Duration::from_secs(10) {
-                                error!("Repeated error within 10 seconds: {:?}", e);
+                                if retry_count == 0 {
+                                    retry_count += 1;
+                                    info!("Giving one more chance after repeated error...");
+                                    time::sleep(Duration::from_secs(60)).await;
+                                    continue;
+                                }
+                                error!("Repeated error within 10 seconds after retry: {:?}", e);
                                 return Err(e);
                             }
                         }
                     }
                 }
 
+                retry_count = 0;
                 last_error = Some(e);
                 last_failure_time = Some(time::Instant::now());
                 info!("Restarting indexer after error...");
