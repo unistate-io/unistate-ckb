@@ -21,8 +21,8 @@ pub async fn find_cell_dep_block_height(cell_dep: &CellDep) -> Result<u64, Error
     let txs = get_fetcher()?.get_txs(vec![tx_hash]).await?;
     let tx = txs.get(0).ok_or(Error::TransactionNotFound)?;
     let block_height = tx
-        .as_ref()
-        .and_then(|tx| tx.tx_status.block_number)
+        .tx_status
+        .block_number
         .ok_or(Error::BlockHeightNotFound)?
         .value();
     Ok(block_height)

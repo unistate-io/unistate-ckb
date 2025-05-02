@@ -54,7 +54,7 @@ impl CategorizedTxContexts {
     }
 }
 
-const MAX_CONCURRENT_BATCHES: usize = 10;
+const MAX_CONCURRENT_BATCHES: usize = 5;
 
 pub struct Indexer {
     height: u64,
@@ -656,7 +656,6 @@ async fn fetch_and_categorize_transactions(
 
     let results = block_views
         .into_par_iter()
-        .flatten()
         .filter_map(|block| {
             let block_num = block.header.inner.number.value();
             if block_num < start_number || block_num >= end_number {
