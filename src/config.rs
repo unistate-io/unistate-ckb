@@ -103,6 +103,7 @@ pub(crate) struct UnistateConfigOptional {
     pub(crate) level: Level,
     pub(crate) network: NetworkType,
     pub(crate) apply_initial_height: bool,
+    pub(crate) max_concurrent_batches: usize,
 }
 
 #[derive(Debug, PartialEq, Deserialize, Clone, Copy)]
@@ -136,6 +137,7 @@ impl Default for UnistateConfigOptional {
             level: Level::Info,
             network: NetworkType::Mainnet,
             apply_initial_height: false,
+            max_concurrent_batches: 1,
         }
     }
 }

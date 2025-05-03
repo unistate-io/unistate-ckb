@@ -54,8 +54,6 @@ impl CategorizedTxContexts {
     }
 }
 
-const MAX_CONCURRENT_BATCHES: usize = 1;
-
 pub struct Indexer {
     height: u64,
     target_height: u64,
@@ -67,6 +65,7 @@ pub struct Indexer {
     network: NetworkType,
     db_commit_handles: VecDeque<(u64, JoinHandle<Result<()>>)>,
     inflight_semaphore: Arc<Semaphore>,
+    max_concurrent_batches: usize,
 }
 
 impl Indexer {
@@ -79,6 +78,7 @@ impl Indexer {
     ) -> Self {
         let max_batch_size = config.unistate.optional_config.batch_size;
         let interval = config.unistate.optional_config.interval;
+        let max_concurrent_batches = config.unistate.optional_config.max_concurrent_batches;
         Self {
             height: initial_height,
             target_height: 0,
@@ -88,8 +88,9 @@ impl Indexer {
             db,
             constants,
             network,
-            db_commit_handles: VecDeque::with_capacity(MAX_CONCURRENT_BATCHES),
-            inflight_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BATCHES)),
+            db_commit_handles: VecDeque::with_capacity(max_concurrent_batches),
+            inflight_semaphore: Arc::new(Semaphore::new(max_concurrent_batches)),
+            max_concurrent_batches,
         }
     }
 
@@ -156,7 +157,7 @@ impl Indexer {
                 (self.target_height.saturating_sub(self.height)).min(self.max_batch_size);
 
             if self.batch_size > 0 {
-                while self.db_commit_handles.len() >= MAX_CONCURRENT_BATCHES {
+                while self.db_commit_handles.len() >= self.max_concurrent_batches {
                     info!(
                         "Commit pipeline full ({} pending). Waiting for oldest commit task to complete...",
                         self.db_commit_handles.len()
@@ -200,7 +201,7 @@ impl Indexer {
                     }
                 }
 
-                if self.db_commit_handles.len() >= MAX_CONCURRENT_BATCHES {
+                if self.db_commit_handles.len() >= self.max_concurrent_batches {
                     warn!("Pipeline still full after waiting, skipping dispatch this cycle.");
                     time::sleep(Duration::from_millis(500)).await;
                     continue;
@@ -226,8 +227,8 @@ impl Indexer {
                     self.batch_size,
                     self.height,
                     self.target_height,
-                    MAX_CONCURRENT_BATCHES - self.inflight_semaphore.available_permits(),
-                    MAX_CONCURRENT_BATCHES
+                    self.max_concurrent_batches - self.inflight_semaphore.available_permits(),
+                    self.max_concurrent_batches
                 );
 
                 let (database_processor, op_sender, commit_signal_sender) =
