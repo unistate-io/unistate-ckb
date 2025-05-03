@@ -1,7 +1,10 @@
 [package]
 name = "unistate-fetcher"
-version = "0.1.1"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ckb-jsonrpc-types = { workspace = true }
