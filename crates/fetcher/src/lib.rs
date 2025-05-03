@@ -1,41 +1,35 @@
 mod wrapper;
-
 use ckb_jsonrpc_types::{
-    BlockNumber,
-    BlockView,
-    CellInput,
-    CellOutput,
-    JsonBytes,
-    OutPoint,
-    Transaction,
-    TransactionView, // Added TransactionView
-    TransactionWithStatusResponse,
+    BlockNumber, BlockView, CellInput, CellOutput, JsonBytes, OutPoint, Transaction,
+    TransactionView, TransactionWithStatusResponse,
 };
 use ckb_types::H256;
-use futures::{FutureExt, future::BoxFuture}; // Added BoxFuture
+use futures::{
+    FutureExt,
+    future::{BoxFuture, select_ok},
+};
 use jsonrpsee::{
-    core::{client::ClientT, client::Error as JsonRpseeError, params::BatchRequestBuilder}, // Added ClientT explicitly
+    core::{client::ClientT, client::Error as JsonRpseeError, params::BatchRequestBuilder},
     http_client::{HttpClient, HttpClientBuilder},
     rpc_params,
 };
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-pub use redb::Database; // Added Database, RedbError
+pub use redb::Database;
 pub use redb::Error as RedbError;
 use redb::{ReadableTable as _, TableDefinition};
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
-
     ops::{Bound, RangeBounds},
     sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock, OnceLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration, // Added Duration
+    time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, info, warn}; // Added warn
-use utils::ResponseFormatGetter; // Assuming this comes from elsewhere in your project
+use tracing::{debug, info, warn};
+use utils::ResponseFormatGetter;
 use wrapper::Bincode;
 
 // Constants for Database Tables
@@ -47,6 +41,13 @@ const TX_COUNT_TABLE: TableDefinition<Bincode<H256>, u64> =
 // Static singletons for Database and Fetcher
 static DB: OnceLock<Database> = OnceLock::new();
 static FETCHER: OnceLock<Fetcher<HttpClient>> = OnceLock::new();
+
+// Helper for Time Representation
+static PROCESS_START_INSTANT: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn instant_to_nanos(instant: Instant) -> u64 {
+    instant.duration_since(*PROCESS_START_INSTANT).as_nanos() as u64
+}
 
 /// Custom error type for the Fetcher module.
 #[derive(Error, Debug)]
@@ -73,7 +74,7 @@ pub enum Error {
     },
 
     #[error("Encountered an issue with the JSON RPC client. Details: {0}")]
-    JsonRpcClient(#[from] JsonRpseeError), // Corrected Error type
+    JsonRpcClient(#[from] JsonRpseeError),
 
     #[error("There was a problem deserializing data. Details: {0}")]
     SerdeJson(#[from] serde_json::Error),
@@ -84,7 +85,7 @@ pub enum Error {
     #[error("Database not initialized")]
     DatabaseNotInitialized,
 
-    #[error("Database already initialized")] // Added for consistency
+    #[error("Database already initialized")]
     DatabaseAlreadyInitialized,
 
     #[error("Fetcher already initialized")]
@@ -94,35 +95,39 @@ pub enum Error {
     FetcherNotInitialized,
 }
 
+const DEFAULT_CLIENT_CAPACITY: usize = 3;
+
 /// Main struct for fetching data from CKB nodes.
 #[derive(Debug)]
 pub struct Fetcher<C> {
-    clients: SmallVec<[C; 2]>,
+    clients: SmallVec<[C; DEFAULT_CLIENT_CAPACITY]>,
     current_index: Arc<AtomicUsize>,
-    retry_interval: u64,
-    max_retries: usize,
+    evaluation_interval: Duration,
+    last_evaluation_time: Arc<AtomicU64>,
+    call_max_retries: usize,
+    call_retry_interval: Duration,
 }
 
 // --- Initialization and Access Functions ---
 
 /// Initializes the global HTTP Fetcher instance.
-///
-/// Must be called only once.
 pub async fn init_http_fetcher(
     urls: impl IntoIterator<Item = impl AsRef<str>>,
-    retry_interval: u64,
-    max_retries: usize,
+    evaluation_interval_secs: u64,
+    call_max_retries: usize,
+    call_retry_interval_ms: u64,
     max_response_size: u32,
     max_request_size: u32,
-    sort_interval_secs: Option<u64>,
 ) -> Result<(), Error> {
+    let evaluation_interval = Duration::from_secs(evaluation_interval_secs);
+    let call_retry_interval = Duration::from_millis(call_retry_interval_ms);
     let fetcher = Fetcher::http_client(
         urls,
-        retry_interval,
-        max_retries,
+        evaluation_interval,
+        call_max_retries,
+        call_retry_interval,
         max_response_size,
         max_request_size,
-        sort_interval_secs,
     )
     .await?;
 
@@ -132,44 +137,40 @@ pub async fn init_http_fetcher(
 }
 
 /// Gets a reference to the initialized global HTTP Fetcher.
-///
-/// Returns `Error::FetcherNotInitialized` if `init_http_fetcher` has not been called.
 pub fn get_fetcher() -> Result<&'static Fetcher<HttpClient>, Error> {
     FETCHER.get().ok_or(Error::FetcherNotInitialized)
 }
 
 /// Initializes the global Database instance.
-///
-/// Opens the required tables. Must be called only once.
-pub fn init_db(db: Database) -> Result<(), Error> {
-    // Check if already initialized before potentially expensive write txn
-    if DB.get().is_some() {
-        return Err(Error::DatabaseAlreadyInitialized);
-    }
-
-    let write_txn = db.begin_write().map_err(redb::Error::from)?;
+#[inline]
+fn init_db_tables(db: &Database) -> Result<(), redb::Error> {
+    let write_txn = db.begin_write()?;
     {
-        let _ = write_txn.open_table(TX_TABLE).map_err(redb::Error::from)?;
-        let _ = write_txn
-            .open_table(TX_COUNT_TABLE)
-            .map_err(redb::Error::from)?;
+        let _ = write_txn.open_table(TX_TABLE)?;
+        let _ = write_txn.open_table(TX_COUNT_TABLE)?;
     }
-    write_txn.commit().map_err(redb::Error::from)?;
+    write_txn.commit()?;
+    Ok(())
+}
 
-    // Use `set` which returns Err if already set.
-    DB.set(db).map_err(|_| Error::DatabaseAlreadyInitialized) // Should ideally not happen due to check above, but safe.
+pub fn init_db(db: Database) -> Result<(), Error> {
+    if DB.get().is_some() {
+        warn!("Database already initialized");
+        return Ok(());
+    }
+
+    init_db_tables(&db)?;
+    DB.set(db).map_err(|_| Error::DatabaseAlreadyInitialized)
 }
 
 /// Gets a reference to the initialized global Database.
-///
-/// Returns `Error::DatabaseNotInitialized` if `init_db` has not been called.
 pub fn get_db() -> Result<&'static Database, Error> {
     DB.get().ok_or(Error::DatabaseNotInitialized)
 }
 
 // --- Database Caching Module ---
 pub mod cache {
-    use super::*; // Import necessary items from parent module
+    use super::*;
 
     pub fn clear_transactions_below_count(db: &Database, threshold: u64) -> Result<(), RedbError> {
         let write_txn = db.begin_write()?;
@@ -216,8 +217,7 @@ pub mod cache {
 
             for hash in hashes {
                 if let Some(tx_guard) = tx_table.get(hash)? {
-                    let current_count = count_table.get(hash)?.map_or(0, |ag| ag.value()); // Use map_or instead of unwrap_or_default
-                    // Increment count on retrieval
+                    let current_count = count_table.get(hash)?.map_or(0, |ag| ag.value());
                     count_table.insert(hash, &(current_count + 1))?;
                     cached_txs.insert(hash.clone(), tx_guard.value());
                 }
@@ -229,7 +229,7 @@ pub mod cache {
 
     pub fn cache_transactions(
         db: &redb::Database,
-        txs: &[TransactionWithStatusResponse], // Use slice
+        txs: &[TransactionWithStatusResponse],
     ) -> Result<HashMap<H256, Transaction>, RedbError> {
         let write_txn = db.begin_write()?;
         let mut fetched_txs = HashMap::new();
@@ -239,20 +239,16 @@ pub mod cache {
 
             for tx_response in txs {
                 if let Some(tx_view) = &tx_response.transaction {
-                    // Use ResponseFormatGetter trait, handle potential error from get_value
                     match tx_view.clone().get_value() {
                         Ok(tx) => {
                             let hash = tx.hash.clone();
                             let inner_tx = tx.inner.clone();
-                            // Insert tx, check if it was new
                             if tx_table.insert(&hash, &inner_tx)?.is_none() {
-                                // Only initialize count if it was newly inserted
                                 count_table.insert(&hash, &0u64)?;
                             }
                             fetched_txs.insert(hash, inner_tx);
                         }
                         Err(e) => {
-                            // Log or handle error if get_value fails (e.g., unexpected format)
                             warn!("Failed to get transaction value during caching: {}", e);
                         }
                     }
@@ -286,7 +282,7 @@ pub mod cache {
 
         let max_entry = count_table
             .iter()?
-            .filter_map(|result| result.ok()) // Filter out potential iteration errors
+            .filter_map(|result| result.ok())
             .max_by_key(|(_, count)| count.value());
 
         Ok(max_entry.map(|(hash, count)| (hash.value(), count.value())))
@@ -295,257 +291,193 @@ pub mod cache {
 pub use cache::*;
 
 // --- Fetcher Implementation ---
-
 impl<C> Fetcher<C>
 where
-    C: ClientT + Send + Sync + Clone + 'static, // Added Sync constraint
+    C: ClientT + Send + Sync + Clone + 'static,
 {
-    /// Returns the currently selected client based on the atomic index.
-    fn client(&self) -> &C {
-        // Relaxed ordering is sufficient for round-robin or fastest-client selection
-        let index = self.current_index.load(Ordering::Relaxed);
-        // Use checked access in production code unless performance is absolutely critical
-        // and bounds are guaranteed elsewhere.
-        self.clients.get(index).unwrap_or_else(|| {
-            // Fallback to the first client if index is somehow out of bounds
-            warn!(
-                "current_index {} out of bounds for clients len {}, falling back to index 0",
-                index,
-                self.clients.len()
-            );
-            &self.clients[0]
-        })
-        // Unsafe version (use with extreme caution):
-        // unsafe { self.clients.get_unchecked(index) }
-    }
-
-    /// Creates a new Fetcher instance. Internal use, prefer `init_http_fetcher`.
-    pub fn new(clients: SmallVec<[C; 2]>, retry_interval: u64, max_retries: usize) -> Self {
+    pub fn new(
+        clients: SmallVec<[C; DEFAULT_CLIENT_CAPACITY]>,
+        evaluation_interval: Duration,
+        call_max_retries: usize,
+        call_retry_interval: Duration,
+    ) -> Self {
         assert!(!clients.is_empty(), "Fetcher requires at least one client");
         Self {
             clients,
-            retry_interval,
-            max_retries,
-            current_index: Arc::new(AtomicUsize::new(0)), // Start with the first client
+            evaluation_interval,
+            call_max_retries,
+            call_retry_interval,
+            current_index: Arc::new(AtomicUsize::new(0)),
+            last_evaluation_time: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Fetches transactions by their hashes, utilizing the cache if available.
-    pub async fn get_txs_by_hashes(
-        &self,
-        hashes: Vec<H256>,
-    ) -> Result<HashMap<H256, Transaction>, Error> {
-        debug!("Getting {} transactions by hashes...", hashes.len());
-
-        if hashes.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        match get_db() {
-            Ok(db) => {
-                // --- Cached Path ---
-                let mut result = cache::get_cached_transactions(db, &hashes)?;
-
-                let missing_hashes: Vec<H256> =
-                    hashes // No need for par_iter on the filter check
-                        .into_iter() // Use standard iterator
-                        .filter(|hash| !result.contains_key(hash))
-                        .collect();
-
-                if !missing_hashes.is_empty() {
-                    debug!(
-                        "Cache miss for {} hashes. Fetching from node...",
-                        missing_hashes.len()
-                    );
-                    let fetched_tx_responses = self.get_txs(missing_hashes).await?;
-
-                    // Cache the newly fetched transactions
-                    let newly_cached_txs = cache::cache_transactions(db, &fetched_tx_responses)?;
-                    result.extend(newly_cached_txs);
-                } else {
-                    debug!("All {} transactions found in cache.", result.len());
-                }
-                Ok(result)
-            }
-            Err(Error::DatabaseNotInitialized) => {
-                // --- Non-Cached Path ---
-                warn!("Database not initialized, fetching all transactions without cache.");
-                let tx_responses = self.get_txs(hashes).await?;
-                let mut result = HashMap::new();
-                for tx_response in tx_responses {
-                    if let Some(tx_view) = tx_response.transaction {
-                        if let Ok(tx) = tx_view.get_value() {
-                            result.insert(tx.hash, tx.inner);
-                        }
-                    }
-                }
-                Ok(result)
-            }
-            Err(e) => Err(e), // Propagate other DB errors (e.g., initialization failed)
+    fn get_current_valid_index(&self) -> usize {
+        let index = self.current_index.load(Ordering::Relaxed);
+        if index >= self.clients.len() {
+            warn!(
+                "current_index {} out of bounds for clients len {}, correcting to 0",
+                index,
+                self.clients.len()
+            );
+            self.current_index
+                .compare_exchange(index, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
+            0
+        } else {
+            index
         }
     }
 
-    /// Internal helper for single RPC calls with retry logic.
     #[inline]
     async fn call<Params, R>(&self, method: &'static str, params: Params) -> Result<R, Error>
     where
-        Params: jsonrpsee::core::traits::ToRpcParams + Send + Clone + Sync + 'static, // Added Sync + 'static
-        R: jsonrpsee::core::DeserializeOwned + Send + 'static,
+        Params: jsonrpsee::core::traits::ToRpcParams + Send + Clone + Sync + 'static,
+        R: jsonrpsee::core::DeserializeOwned + Send + Sync + 'static,
     {
         let mut current_retries = 0;
-
         loop {
-            let client = self.client(); // Get the current client
+            let client_idx = self.get_current_valid_index();
+            let client = &self.clients[client_idx];
             let result = client.request::<R, Params>(method, params.clone()).await;
 
             match result {
                 Ok(response) => return Ok(response),
                 Err(err) => {
+                    if current_retries >= self.call_max_retries {
+                        warn!(
+                            "RPC call '{}' failed after {} retries on client {}: {}. Giving up.",
+                            method, self.call_max_retries, client_idx, err
+                        );
+                        return Err(Error::JsonRpcClient(err));
+                    }
+
                     warn!(
-                        "RPC call '{}' failed (attempt {}/{}): {}. Retrying in {}ms...",
+                        "RPC call '{}' failed on client {} (attempt {}/{}): {}. Retrying in {:?}...",
                         method,
+                        client_idx,
                         current_retries + 1,
-                        self.max_retries + 1, // +1 because we try once initially
+                        self.call_max_retries + 1,
                         err,
-                        self.retry_interval
+                        self.call_retry_interval
                     );
                     current_retries += 1;
-                    if current_retries > self.max_retries {
-                        // Optionally try switching client after max retries on the current one
-                        // This adds complexity, consider if simple failure is better.
-                        // let new_idx = self.sort_clients().await?; // Ensure sort_clients exists and works
-                        // if new_idx != initial_client_index {
-                        //     warn!("Switching client after max retries failed on index {}", initial_client_index);
-                        //     self.current_index.store(new_idx, Ordering::Relaxed);
-                        //     current_retries = 0; // Reset retries for the new client
-                        //     continue; // Try again with the new client immediately
-                        // } else {
-                        //     // If sorting didn't find a better client or failed, return the error
-                        return Err(Error::JsonRpcClient(err));
-                        // }
-                    }
-                    tokio::time::sleep(Duration::from_millis(self.retry_interval)).await;
+                    tokio::time::sleep(self.call_retry_interval).await;
                 }
             }
         }
     }
 
-    /// Internal helper for batch RPC calls with retry logic.
     #[inline]
     async fn batch_request<R>(
         &self,
-        batch_request: BatchRequestBuilder<'static>, // Takes pre-built request
+        batch_request_builder: BatchRequestBuilder<'static>,
     ) -> Result<Vec<R>, Error>
     where
-        R: jsonrpsee::core::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static, // Added Sync + 'static
+        R: jsonrpsee::core::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     {
-        let mut current_retries = 0;
+        let current_req_time = Instant::now();
+        let current_req_nanos = instant_to_nanos(current_req_time);
+        let last_eval_nanos = self.last_evaluation_time.load(Ordering::Acquire);
+        let eval_interval_nanos = self.evaluation_interval.as_nanos() as u64;
+        let is_benchmark_due =
+            current_req_nanos.saturating_sub(last_eval_nanos) >= eval_interval_nanos;
+        let preferred_idx = self.get_current_valid_index();
 
-        loop {
-            let client = self.client().clone(); // Clone client for the request future
-            let current_batch = batch_request.clone(); // Clone the builder for the request future
-
+        // Try preferred client first unless benchmark is due
+        if !is_benchmark_due {
+            debug!("Batch Request: Trying preferred client {}", preferred_idx);
+            let client = self.clients[preferred_idx].clone();
+            let builder = batch_request_builder.clone();
             // NOTE: This `.boxed()` is kept as per the original code's comment.
             // Evaluate if it's truly necessary for your specific Rust version/deps.
-            let result = client.batch_request::<R>(current_batch).boxed().await;
-
-            match result {
-                Ok(response) => {
-                    // Attempt to parse results, handling individual errors
-                    let results: Result<Vec<_>, _> = response
-                        .into_iter()
-                        .map(|res| {
-                            res.map_err(|err| {
-                                // Map individual item error within the batch
-                                Error::FailedFetch {
-                                    code: err.code(),
-                                    message: err.message().into(),
-                                }
-                            })
-                        })
-                        .collect();
-                    return results; // Return Vec<R> or the first FailedFetch error
-                }
-                Err(err) => {
-                    // This error means the *entire batch request* failed (network, server error, or root parse error)
-                    warn!(
-                        "Batch request failed (attempt {}/{}): {}. Retrying in {}ms...",
-                        current_retries + 1,
-                        self.max_retries + 1,
-                        err, // Log the specific jsonrpsee error
-                        self.retry_interval
-                    );
-
-                    current_retries += 1;
-                    if current_retries > self.max_retries {
-                        // Consider switching client here as well, similar to `call`
-                        // let new_idx = self.sort_clients().await?;
-                        // if new_idx != initial_client_index { ... }
-                        return Err(Error::JsonRpcClient(err));
+            match client.batch_request::<R>(builder).boxed().await {
+                Ok(batch_response) => {
+                    // Preferred client responded, process the results
+                    match batch_response.into_iter().collect::<Result<Vec<R>, _>>() {
+                        Ok(response) => {
+                            debug!(
+                                "Batch Request: Succeeded on preferred client {}",
+                                preferred_idx
+                            );
+                            return Ok(response);
+                        }
+                        Err(request_error) => {
+                            warn!(
+                                "Batch Request: Preferred client {} responded but contained error: {}",
+                                preferred_idx, request_error
+                            );
+                            return Err(Error::JsonRpcClient(request_error.into()));
+                        }
                     }
-                    tokio::time::sleep(Duration::from_millis(self.retry_interval)).await;
+                }
+                Err(client_error) => {
+                    debug!(
+                        "Batch Request: Failed on preferred client {} with client error: {}. Falling back to race.",
+                        preferred_idx, client_error
+                    );
                 }
             }
         }
-    }
 
-    /// Sorts clients by pinging `get_tip_block_number` and returns the index of the fastest *responding* client.
-    /// This method modifies the internal `current_index`.
-    pub async fn sort_clients(&self) -> Result<usize, Error> {
-        let (idx, duration) = sort_clients_by_speed_static(&self.clients).await?;
-        debug!(
-            "Fastest client is index {} with duration {:?}. Updating current index.",
-            idx, duration
-        );
-        self.current_index.store(idx, Ordering::Relaxed);
-        Ok(idx)
-    }
-
-    /// Spawns a background task that periodically sorts clients.
-    /// Requires the `Fetcher` to live for the 'static lifetime implicitly via `OnceLock` or be `Arc`ed.
-    pub fn start_background_sorting(&self, interval_secs: u64) {
+        // Race all clients if benchmark is due or preferred client failed
         info!(
-            "Starting background client sorting task with interval {}s",
-            interval_secs
-        );
-        // Clone data needed by the background task BEFORE spawning.
-        let clients_clone = self.clients.clone(); // Requires C: Clone
-        let current_index_clone = Arc::clone(&self.current_index);
-
-        tokio::spawn(async move {
-            // Use the cloned data, not `self` or the static `FETCHER`.
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-            interval.tick().await; // Consume the initial immediate tick
-
-            loop {
-                interval.tick().await;
-                debug!("Background task: Sorting clients...");
-                match sort_clients_by_speed_static(&clients_clone).await {
-                    Ok((idx, duration)) => {
-                        let old_idx = current_index_clone.swap(idx, Ordering::Relaxed);
-                        if old_idx != idx {
-                            info!(
-                                "Background sort: Switched active client from index {} to {} (latency: {:?})",
-                                old_idx, idx, duration
-                            );
-                        } else {
-                            debug!(
-                                "Background sort: Fastest client remains index {} (latency: {:?})",
-                                idx, duration
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Background client sorting failed: {}", e);
-                        // Decide how to handle errors: continue, retry later, log?
-                        // For now, just log and continue the loop.
-                    }
-                }
+            "Batch Request: Racing all clients {}",
+            if is_benchmark_due {
+                "due to benchmark interval"
+            } else {
+                "after preferred client failure"
             }
-        });
-    }
+        );
 
-    // --- Public API Methods ---
+        let mut futures = Vec::with_capacity(self.clients.len());
+        for (idx, client) in self.clients.iter().enumerate() {
+            let builder = batch_request_builder.clone();
+            let client_clone = client.clone();
+            let fut = async move {
+                let start = Instant::now();
+                // NOTE: This `.boxed()` is kept as per the original code's comment.
+                // Evaluate if it's truly necessary for your specific Rust version/deps.
+                let result = client_clone.batch_request::<R>(builder).boxed().await;
+                let elapsed = start.elapsed();
+                result?
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(Into::into)
+                    .map(|res| (idx, res, elapsed))
+            }
+            .boxed();
+            futures.push(fut);
+        }
+
+        match select_ok(futures).await {
+            Ok(((winning_idx, response, duration), _remaining_futures)) => {
+                let old_idx = self.current_index.swap(winning_idx, Ordering::Release);
+                self.last_evaluation_time
+                    .store(instant_to_nanos(Instant::now()), Ordering::Release);
+
+                if old_idx != winning_idx {
+                    info!(
+                        "Batch Request: Race succeeded. Switched preferred client from {} to {} ({:?})",
+                        old_idx, winning_idx, duration
+                    );
+                } else {
+                    debug!(
+                        "Batch Request: Race succeeded. Preferred client {} remains fastest ({:?})",
+                        winning_idx, duration
+                    );
+                }
+                Ok(response)
+            }
+            Err(e) => {
+                warn!(
+                    "Batch Request: Failed on ALL clients during race. Last error: {}",
+                    e
+                );
+                Err(Error::JsonRpcClient(e))
+            }
+        }
+    }
 
     pub async fn get_outputs_ignore_not_found(
         &self,
@@ -559,23 +491,22 @@ where
             return Ok(Vec::new());
         }
 
-        let hashes: Vec<H256> = inputs // Collect unique tx hashes needed
-            .par_iter() // Use parallel iterator for mapping
+        let hashes: Vec<H256> = inputs
+            .par_iter()
             .map(|input| input.previous_output.tx_hash.clone())
-            .collect::<HashSet<_>>() // Collect into HashSet to get unique hashes
-            .into_par_iter() // Convert back for parallel collection (optional)
+            .collect::<HashSet<_>>()
+            .into_par_iter()
             .collect();
 
-        let txs = self.get_txs_by_hashes(hashes).await?; // Fetch (potentially cached) transactions
+        let txs = self.get_txs_by_hashes(hashes).await?;
 
         let outputs = inputs
-            .into_par_iter() // Parallel processing of inputs
+            .into_par_iter()
             .filter_map(|input| {
                 let index = input.previous_output.index.value() as usize;
-                // Check if tx exists and index is valid
                 txs.get(&input.previous_output.tx_hash)
                     .and_then(|tx| tx.outputs.get(index))
-                    .cloned() // Clone the output if found
+                    .cloned()
             })
             .collect::<Vec<_>>();
 
@@ -599,21 +530,20 @@ where
         let txs = self.get_txs_by_hashes(hashes).await?;
 
         inputs
-            .into_par_iter() // Use parallel map for potential performance gain
+            .into_par_iter()
             .map(|input| {
                 let tx_hash = input.previous_output.tx_hash.clone();
                 let index = input.previous_output.index.value();
                 let tx_opt = txs.get(&tx_hash);
-
                 tx_opt
                     .and_then(|tx| tx.outputs.get(index as usize).cloned())
                     .ok_or_else(|| Error::PreviousOutputNotFound {
-                        tx_hash, // Use cloned hash
+                        tx_hash,
                         index,
                         outputs_len: tx_opt.map_or(0, |tx| tx.outputs.len()),
                     })
             })
-            .collect::<Result<Vec<_>, _>>() // Collect into a Result<Vec<CellOutput>, Error>
+            .collect::<Result<Vec<_>, _>>()
     }
 
     pub async fn get_outputs_with_data(
@@ -651,7 +581,7 @@ where
                         tx_hash: tx_hash.clone(),
                         index: index as u32,
                         outputs_len: tx_opt.map_or(0, |tx| tx.outputs.len()),
-                    })?; // Early return if output not found
+                    })?;
 
                 let data = tx_opt
                     .and_then(|tx| tx.outputs_data.get(index).cloned())
@@ -659,11 +589,11 @@ where
                         tx_hash: tx_hash.clone(),
                         index: index as u32,
                         outputs_data_len: tx_opt.map_or(0, |tx| tx.outputs_data.len()),
-                    })?; // Early return if data not found
+                    })?;
 
                 Ok((out_point, output, data))
             })
-            .collect::<Result<Vec<_>, Error>>() // Collect results, propagating the first error
+            .collect::<Result<Vec<_>, Error>>()
     }
 
     pub async fn get_outputs_with_data_ignore_not_found(
@@ -690,19 +620,18 @@ where
         let results = inputs
             .into_par_iter()
             .filter_map(|input| {
-                let out_point = input.previous_output; // No need to clone yet
+                let out_point = input.previous_output;
                 let tx_hash = &out_point.tx_hash;
                 let index = out_point.index.value() as usize;
                 let tx_opt = txs.get(tx_hash);
-
                 match (
                     tx_opt.and_then(|tx| tx.outputs.get(index)),
                     tx_opt.and_then(|tx| tx.outputs_data.get(index)),
                 ) {
                     (Some(output), Some(data)) => {
-                        Some((out_point.clone(), output.clone(), data.clone())) // Clone only if found
+                        Some((out_point.clone(), output.clone(), data.clone()))
                     }
-                    _ => None, // Ignore if either output or data is missing
+                    _ => None,
                 }
             })
             .collect::<Vec<_>>();
@@ -712,8 +641,6 @@ where
         );
         Ok(results)
     }
-
-    // --- Direct RPC Passthrough Methods ---
 
     pub async fn get_tip_block_number(&self) -> Result<BlockNumber, Error> {
         self.call("get_tip_block_number", rpc_params!()).await
@@ -738,11 +665,8 @@ where
         for number in numbers {
             batch_request
                 .insert("get_block_by_number", rpc_params!(number))
-                // Panic is acceptable here as it indicates a programming error
                 .expect("Bug: Failed to insert get_block_by_number into batch");
         }
-        // Batch request returns Vec<Result<T, Error>>, we map internal errors
-        // Note: get_block_by_number returns Option<BlockView>
         self.batch_request(batch_request).await
     }
 
@@ -751,41 +675,25 @@ where
         R: RangeBounds<N>,
         N: Into<BlockNumber> + Copy,
     {
-        // Determine start block number
         let start = match range.start_bound() {
             Bound::Included(n) => (*n).into(),
-            Bound::Excluded(n) => {
-                let num = (*n).into().value();
-                // Check for potential overflow if N is already u64::MAX
-                BlockNumber::from(num.saturating_add(1))
-            }
-            Bound::Unbounded => BlockNumber::from(0), // Assuming start from genesis
+            Bound::Excluded(n) => BlockNumber::from((*n).into().value().saturating_add(1)),
+            Bound::Unbounded => BlockNumber::from(0),
         };
-
-        // Determine end block number
         let end = match range.end_bound() {
             Bound::Included(n) => (*n).into(),
-            Bound::Excluded(n) => {
-                let num = (*n).into().value();
-                // Check for potential underflow if N is 0
-                BlockNumber::from(num.saturating_sub(1))
-            }
+            Bound::Excluded(n) => BlockNumber::from((*n).into().value().saturating_sub(1)),
             Bound::Unbounded => self.get_tip_block_number().await?,
         };
 
-        // Handle invalid or empty range
         if start > end {
             debug!("get_blocks_range: empty range (start > end)");
             return Ok(Vec::new());
         }
-
-        // Generate the sequence of block numbers (inclusive)
         let block_numbers: Vec<BlockNumber> = (start.value()..=end.value())
             .map(BlockNumber::from)
             .collect();
-
         if block_numbers.is_empty() {
-            // This can happen if start == end and the range was exclusive end, etc.
             debug!("get_blocks_range: calculated empty block number list");
             return Ok(Vec::new());
         }
@@ -796,18 +704,8 @@ where
             end.value(),
             block_numbers.len()
         );
-
-        // Fetch the blocks using the batch method
         let block_options = self.get_blocks(block_numbers).await?;
-
-        // Filter out None results (blocks not found, which shouldn't happen in a range unless tip changed)
         let blocks: Vec<BlockView> = block_options.into_iter().filter_map(|opt| opt).collect();
-
-        // Optional: Check if the number of blocks matches requested, could indicate issues.
-        // if blocks.len() != block_options.len() {
-        //     warn!("get_blocks_range: Mismatch between requested and found blocks. Tip might have changed or node issue.");
-        // }
-
         Ok(blocks)
     }
 
@@ -825,31 +723,72 @@ where
                 .insert("get_transaction", rpc_params!(hash))
                 .expect("Bug: Failed to insert get_transaction into batch");
         }
-        // Note: get_transaction returns TransactionWithStatusResponse which includes Option<TransactionView>
         self.batch_request(batch_request).await
+    }
+
+    pub async fn get_txs_by_hashes(
+        &self,
+        hashes: Vec<H256>,
+    ) -> Result<HashMap<H256, Transaction>, Error> {
+        debug!("Getting {} transactions by hashes...", hashes.len());
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        match get_db() {
+            Ok(db) => {
+                let mut result = cache::get_cached_transactions(db, &hashes)?;
+                let missing_hashes: Vec<H256> = hashes
+                    .into_iter()
+                    .filter(|hash| !result.contains_key(hash))
+                    .collect();
+
+                if !missing_hashes.is_empty() {
+                    debug!(
+                        "Cache miss for {} hashes. Fetching from node...",
+                        missing_hashes.len()
+                    );
+                    let fetched_tx_responses = self.get_txs(missing_hashes).await?;
+                    let newly_cached_txs = cache::cache_transactions(db, &fetched_tx_responses)?;
+                    result.extend(newly_cached_txs);
+                } else {
+                    debug!("All {} transactions found in cache.", result.len());
+                }
+                Ok(result)
+            }
+            Err(Error::DatabaseNotInitialized) => {
+                warn!("Database not initialized, fetching all transactions without cache.");
+                let tx_responses = self.get_txs(hashes).await?;
+                let mut result = HashMap::new();
+                for tx_response in tx_responses {
+                    if let Some(tx_view) = tx_response.transaction {
+                        if let Ok(tx) = tx_view.get_value() {
+                            result.insert(tx.hash, tx.inner);
+                        }
+                    }
+                }
+                Ok(result)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
 // --- Specific HTTP Fetcher Implementation ---
-
 pub type HttpFetcher = Fetcher<HttpClient>;
 
 impl Fetcher<HttpClient> {
-    /// Creates and initializes an HTTP Fetcher instance.
-    /// Internal use by `init_http_fetcher`.
     pub async fn http_client(
         urls: impl IntoIterator<Item = impl AsRef<str>>,
-        retry_interval: u64,
-        max_retries: usize,
+        evaluation_interval: Duration,
+        call_max_retries: usize,
+        call_retry_interval: Duration,
         max_response_size: u32,
         max_request_size: u32,
-        sort_interval_secs: Option<u64>,
     ) -> Result<Self, Error> {
         let mut clients = SmallVec::new();
-        let urls_vec: Vec<_> = urls.into_iter().collect(); // Collect to check emptiness
-
+        let urls_vec: Vec<_> = urls.into_iter().collect();
         if urls_vec.is_empty() {
-            // Or return a specific error like `Error::NoClientsProvided`
             panic!("Fetcher requires at least one URL");
         }
 
@@ -858,43 +797,43 @@ impl Fetcher<HttpClient> {
             debug!("Building HTTP client for URL: {}", url_str);
             let builder = HttpClientBuilder::default()
                 .max_response_size(max_response_size)
-                .max_request_size(max_request_size)
-                // Add other configurations like timeouts if needed
-                // .request_timeout(Duration::from_secs(30))
-                ;
-            // Use `?` to propagate jsonrpsee::core::Error, mapped via From trait in Error enum
+                .max_request_size(max_request_size);
             let client = builder.build(url_str)?;
             clients.push(client);
         }
 
-        let fetcher = Self::new(clients, retry_interval, max_retries);
+        let fetcher = Self::new(
+            clients,
+            evaluation_interval,
+            call_max_retries,
+            call_retry_interval,
+        );
 
-        // Perform initial sort to select the best starting client
-        match fetcher.sort_clients().await {
-            Ok(idx) => info!("Selected fastest initial client at index {}", idx),
-            Err(e) => warn!("Initial client sort failed: {}. Using index 0.", e), // Continue with default index 0
-        }
-
-        // Start background sorting if interval is specified
-        if let Some(interval) = sort_interval_secs {
-            // Pass self to the method, it will clone necessary data
-            fetcher.start_background_sorting(interval);
+        match sort_clients_by_speed_static(&fetcher.clients).await {
+            Ok((idx, duration)) => {
+                info!(
+                    "Initial client selection: Fastest client is index {} ({:?}). Setting as preferred.",
+                    idx, duration
+                );
+                fetcher.current_index.store(idx, Ordering::Relaxed);
+                fetcher
+                    .last_evaluation_time
+                    .store(instant_to_nanos(Instant::now()), Ordering::Relaxed);
+            }
+            Err(e) => {
+                warn!("Initial client sort failed: {}. Starting with client 0.", e);
+            }
         }
 
         Ok(fetcher)
     }
 }
 
-// --- Helper function for sorting ---
-
-/// Sorts a list of clients by pinging `get_tip_block_number` and returns the index
-/// and duration of the fastest *responding* client. Does not modify any state.
 async fn sort_clients_by_speed_static<C>(clients: &[C]) -> Result<(usize, Duration), Error>
 where
     C: ClientT + Send + Sync + Clone + 'static,
 {
     if clients.is_empty() {
-        // This case should be prevented by checks in `new` and `http_client`
         panic!("Attempted to sort empty client list");
     }
 
@@ -902,26 +841,26 @@ where
         Vec::with_capacity(clients.len());
 
     for (idx, client) in clients.iter().enumerate() {
-        let client_clone = client.clone(); // Clone client for the async block
+        let client_clone = client.clone();
         let fut = async move {
             let start = std::time::Instant::now();
-            // Use a simple, quick request like get_tip_block_number
             let _result = client_clone
                 .request::<BlockNumber, _>("get_tip_block_number", rpc_params!())
-                .await?; // Propagate jsonrpsee error if request fails
+                .await?;
             Ok((idx, start.elapsed()))
         }
-        .boxed(); // Box the future
+        .boxed();
         futures.push(fut);
     }
 
-    // Wait for the first successful future to complete
     match futures::future::select_ok(futures).await {
         Ok(((idx, duration), _remaining_futures)) => Ok((idx, duration)),
         Err(e) => {
-            // This error means *all* client checks failed.
-            warn!("All clients failed health check during sorting: {}", e);
-            Err(Error::JsonRpcClient(e)) // Return the error from the last future that failed in select_ok
+            warn!(
+                "All clients failed health check during initial sorting: {}",
+                e
+            );
+            Err(Error::JsonRpcClient(e))
         }
     }
 }
@@ -935,7 +874,7 @@ mod tests {
     use std::path::Path; // For path manipulation
 
     // Helper to create a fetcher for tests, ensuring DB is cleaned up
-    async fn setup_test_fetcher(db_path: &str, sort_interval: Option<u64>) -> Result<(), Error> {
+    async fn setup_test_fetcher(db_path: &str) -> Result<(), Error> {
         // Ensure clean state
         if Path::new(db_path).exists() {
             std::fs::remove_file(db_path).expect("Failed to delete test DB file");
@@ -951,11 +890,11 @@ mod tests {
                 "https://mainnet.ckbapp.dev/",
                 // "http://51.15.217.238:8114", // This one might be less reliable
             ],
-            500,              // retry_interval
-            3,                // max_retries
+            500,              // evaluation_interval_secs (u64)
+            3,                // call_max_retries (usize)
+            100, // call_retry_interval_ms (u64) - Added missing argument with a default value
             10 * 1024 * 1024, // max_response_size (10MB)
             10 * 1024 * 1024, // max_request_size (10MB)
-            sort_interval,    // Optional background sorting
         )
         .await
     }
@@ -975,7 +914,7 @@ mod tests {
     #[ignore] // Mark as ignore as it hits external network and takes time
     async fn test_fetcher_methods_with_cache() {
         let db_path = "test_fetcher_methods_with_cache.redb";
-        setup_test_fetcher(db_path, Some(60)).await.unwrap(); // Enable sorting for test
+        setup_test_fetcher(db_path).await.unwrap(); // Enable sorting for test
 
         let fetcher = get_fetcher().expect("Fetcher should be initialized");
         let db = get_db().expect("DB should be initialized");
@@ -1211,7 +1150,7 @@ mod tests {
     #[tracing_test::traced_test]
     async fn test_get_blocks_range_variants() {
         let db_path = "test_range_variants.redb";
-        setup_test_fetcher(db_path, None).await.unwrap(); // No sorting needed here
+        setup_test_fetcher(db_path).await.unwrap(); // No sorting needed here
         let fetcher = get_fetcher().expect("Fetcher should be initialized");
 
         let tip = fetcher.get_tip_block_number().await.unwrap().value();

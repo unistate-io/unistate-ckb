@@ -35,11 +35,11 @@ impl Config {
         let fc = &self.unistate.featcher;
         fetcher::init_http_fetcher(
             &self.unistate.urls,
-            fc.retry_interval,
+            fc.sort_interval_secs.unwrap_or(600),
             fc.max_retries,
+            fc.retry_interval,
             fc.max_response_size,
             fc.max_request_size,
-            fc.sort_interval_secs,
         )
         .await?;
         Ok(())

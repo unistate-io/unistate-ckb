@@ -54,7 +54,7 @@ impl CategorizedTxContexts {
     }
 }
 
-const MAX_CONCURRENT_BATCHES: usize = 5;
+const MAX_CONCURRENT_BATCHES: usize = 1;
 
 pub struct Indexer {
     height: u64,
