@@ -757,7 +757,6 @@ where
                 Ok(result)
             }
             Err(Error::DatabaseNotInitialized) => {
-                warn!("Database not initialized, fetching all transactions without cache.");
                 let tx_responses = self.get_txs(hashes).await?;
                 let mut result = HashMap::new();
                 for tx_response in tx_responses {
