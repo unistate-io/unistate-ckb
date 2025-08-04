@@ -156,7 +156,8 @@ define_upsert_functions! {
     upsert_many_actions => (
         spore_actions,
         define_conflict!(
-            spore_actions::Column::TxHash
+            spore_actions::Column::TxHash,
+            spore_actions::Column::ActionIndex
         )
     ),
 

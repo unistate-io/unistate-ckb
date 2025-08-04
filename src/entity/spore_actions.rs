@@ -25,6 +25,8 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub action_data: Option<Json>,
     pub tx_timestamp: DateTime,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub action_index: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
