@@ -5,6 +5,8 @@ use rayon::iter::{
     IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
     ParallelIterator,
 };
+use rayon::slice::ParallelSlice as _;
+
 use sea_orm::{Set, prelude::Json};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -38,17 +40,34 @@ pub fn index_spores(
     constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
-    // Iterate over contexts
-    txs.into_par_iter().try_for_each(|ctx| {
-        index_spore(
-            ctx.tx,           // Pass tx from context
-            ctx.timestamp,    // Pass timestamp from context
-            ctx.block_number, // Pass block_number from context
-            network,
-            op_sender.clone(),
-            constants,
-        )
-    })?;
+    // Use adaptive parallel processing based on transaction count
+    if txs.len() > 100 {
+        // Process in chunks for better memory locality
+        txs.par_chunks(20).try_for_each(|chunk| {
+            chunk.iter().try_for_each(|ctx| {
+                index_spore(
+                    ctx.tx.clone(),
+                    ctx.timestamp,
+                    ctx.block_number,
+                    network,
+                    op_sender.clone(),
+                    constants,
+                )
+            })
+        })?;
+    } else {
+        // Simple parallel iteration for small batches
+        txs.into_par_iter().try_for_each(|ctx| {
+            index_spore(
+                ctx.tx,
+                ctx.timestamp,
+                ctx.block_number,
+                network,
+                op_sender.clone(),
+                constants,
+            )
+        })?;
+    }
 
     Ok(())
 }
@@ -80,11 +99,18 @@ fn index_spore(
 
     let tx_hash = tx.hash.clone();
 
-    tx.inner
+    // Pre-compute output pairs to enable better parallel processing
+    let output_pairs: Vec<_> = tx
+        .inner
         .outputs_data
-        .par_iter()
-        .zip(tx.inner.outputs.par_iter())
+        .iter()
+        .zip(tx.inner.outputs.iter())
         .enumerate()
+        .collect();
+
+    // Process outputs in parallel with optimized data access
+    output_pairs
+        .into_par_iter()
         .filter_map(|(index, (output_data, output_cell))| {
             let type_script = output_cell.type_.as_ref()?;
             let id = type_script.args.as_bytes().get(..32)?.to_vec();
@@ -128,14 +154,13 @@ fn index_spore(
             )
         })?;
 
-    extract_actions(&tx)
+    extract_actions(&tx, &constants)
         .into_par_iter()
-        .enumerate()
-        .try_for_each(|(action_index, action_data)| {
+        .try_for_each(|(output_index, action_data)| {
             insert_action(
                 action_data,
                 &tx_hash,
-                action_index as i32,
+                output_index as i32,
                 network,
                 block_number,
                 timestamp,
@@ -378,25 +403,31 @@ fn upsert_spore_or_cluster(
         output_index,
     } = data;
 
-    // Upsert addresses involved and get their string IDs
-    let type_address_id = upsert_address(
-        // Use helper
-        &type_id_script,
-        network,
-        block_number,
-        tx_hash,
-        timestamp,
-        op_sender.clone(),
-    )?;
-    let owner_address_id = upsert_address(
-        // Use helper
-        &to_address_script, // Use the 'to' address as the owner
-        network,
-        block_number,
-        tx_hash,
-        timestamp,
-        op_sender.clone(),
-    )?;
+    // Upsert addresses involved in parallel for better performance
+    let (type_address_id_result, owner_address_id_result) = rayon::join(
+        || {
+            upsert_address(
+                &type_id_script,
+                network,
+                block_number,
+                tx_hash,
+                timestamp,
+                op_sender.clone(),
+            )
+        },
+        || {
+            upsert_address(
+                &to_address_script, // Use the 'to' address as the owner
+                network,
+                block_number,
+                tx_hash,
+                timestamp,
+                op_sender.clone(),
+            )
+        },
+    );
+    let type_address_id = type_address_id_result?;
+    let owner_address_id = owner_address_id_result?;
 
     let block_num_i64 = block_number as i64;
     let tx_hash_vec = tx_hash.0.to_vec();
@@ -469,17 +500,27 @@ fn upsert_spore_or_cluster(
 fn insert_action(
     action_union: action::SporeActionUnion,
     tx_hash: &H256,
-    action_index: i32,
+    output_index: i32,
     network: NetworkType,
     block_number: u64,
     timestamp: u64,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> anyhow::Result<()> {
-    // Upsert related addresses to ensure they exist before referencing
-    let from_id =
-        action_union.from_address_id(network, block_number, tx_hash, timestamp, op_sender.clone());
-    let to_id =
-        action_union.to_address_id(network, block_number, tx_hash, timestamp, op_sender.clone());
+    // Upsert related addresses in parallel for better performance
+    let (from_id_result, to_id_result) = rayon::join(
+        || {
+            action_union.from_address_id(
+                network,
+                block_number,
+                tx_hash,
+                timestamp,
+                op_sender.clone(),
+            )
+        },
+        || action_union.to_address_id(network, block_number, tx_hash, timestamp, op_sender.clone()),
+    );
+    let from_id = from_id_result;
+    let to_id = to_id_result;
 
     // Create the action model
     let action_model = spore_actions::ActiveModel {
@@ -493,7 +534,7 @@ fn insert_action(
         to_address_id: Set(to_id),
         action_data: Set(action_union.to_action_data_json()), // Store raw hex in JSON
         tx_timestamp: Set(to_timestamp_naive(timestamp)),     // Use helper
-        action_index: Set(action_index),
+        output_index: Set(output_index),
     };
 
     debug!("insert action: {:?}", action_model);
@@ -507,33 +548,29 @@ fn insert_action(
 }
 
 // Extract actions from transaction witnesses
-fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::SporeActionUnion> {
-    // Get SighashAll messages from witnesses
-    let msgs = tx
+fn extract_actions(
+    tx: &ckb_jsonrpc_types::TransactionView,
+    constants: &Constants,
+) -> Vec<(usize, action::SporeActionUnion)> {
+    // Get SighashAll messages from witnesses in parallel
+    let msgs: Vec<_> = tx
         .inner
         .witnesses
-        .par_iter() // Parallel iteration over witnesses
+        .par_iter()
         .filter_map(|witness| {
             WitnessLayoutReader::from_slice(witness.as_bytes())
                 .ok()
                 .and_then(|r| match r.to_enum() {
                     WitnessLayoutUnionReader::SighashAll(s) => Some(s.message().to_entity()),
-                    _ => None, // Ignore other witness types
+                    _ => None,
                 })
         })
-        .collect::<Vec<_>>(); // Collect messages
+        .collect();
 
-    // debug!(
-    //     "Extracted {} SighashAll messages from witnesses for tx {}",
-    //     msgs.len(),
-    //     tx.hash
-    // );
-
-    // Extract actions from messages
+    // Extract actions from messages in parallel - optimized with better parallel processing
     let spore_actions: Vec<_> = msgs
-        .par_iter() // Parallel iterator over messages
+        .par_iter()
         .map(|msg| {
-            // Sequentially process actions within each message
             msg.actions()
                 .into_iter()
                 .filter_map(|action| {
@@ -541,17 +578,85 @@ fn extract_actions(tx: &ckb_jsonrpc_types::TransactionView) -> Vec<action::Spore
                         .ok()
                         .map(|reader| reader.to_entity().to_enum())
                 })
-                .collect::<Vec<_>>() // Collect actions for this message
+                .collect::<Vec<_>>()
         })
-        // Flatten the Vec<Vec<Action>> into a ParallelIterator<Action>
         .flatten()
-        // Collect all actions into the final Vec
         .collect();
 
-    // debug!("Extracted {} spore actions for tx {}", spore_actions.len(), tx.hash);
+    // Build spore_id to output_index map in parallel
+    let spore_id_to_output_index: std::collections::HashMap<Vec<u8>, usize> = tx
+        .inner
+        .outputs
+        .par_iter()
+        .enumerate()
+        .filter_map(|(index, output)| {
+            let type_script = output.type_.as_ref()?;
+            if constants.is_spore_type(type_script) || constants.is_cluster_type(type_script) {
+                type_script
+                    .args
+                    .as_bytes()
+                    .get(..32)
+                    .map(|bytes| (bytes.to_vec(), index))
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    spore_actions
+    // Match actions with output indices in parallel
+    let actions_with_indices: Vec<(usize, action::SporeActionUnion)> = spore_actions
+        .into_par_iter()
+        .filter_map(|action| {
+            // Get spore_id from the action
+            let spore_id = match &action {
+                action::SporeActionUnion::MintSpore(raw) => {
+                    Some(raw.spore_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::TransferSpore(raw) => {
+                    Some(raw.spore_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::BurnSpore(raw) => {
+                    Some(raw.spore_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::MintCluster(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::TransferCluster(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::MintProxy(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::TransferProxy(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::BurnProxy(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::MintAgent(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::TransferAgent(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::BurnAgent(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+            };
+
+            // Find the corresponding output_index
+            spore_id.and_then(|id| {
+                spore_id_to_output_index
+                    .get(&id)
+                    .map(|&index| (index, action))
+            })
+        })
+        .collect();
+
+    actions_with_indices
 }
+
+// Keep the old function for backward compatibility during transition
 
 #[cfg(test)]
 mod tests {

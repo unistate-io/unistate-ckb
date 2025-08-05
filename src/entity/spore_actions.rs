@@ -26,7 +26,7 @@ pub struct Model {
     pub action_data: Option<Json>,
     pub tx_timestamp: DateTime,
     #[sea_orm(primary_key, auto_increment = false)]
-    pub action_index: i32,
+    pub output_index: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

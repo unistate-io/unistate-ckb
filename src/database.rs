@@ -157,7 +157,7 @@ define_upsert_functions! {
         spore_actions,
         define_conflict!(
             spore_actions::Column::TxHash,
-            spore_actions::Column::ActionIndex
+            spore_actions::Column::OutputIndex
         )
     ),
 

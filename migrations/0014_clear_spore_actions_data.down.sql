@@ -1,0 +1,3 @@
+-- Down migration for clearing spore_actions data
+-- Since we deleted all data, there's nothing to restore
+-- This is an empty migration as the data will be recreated by reindexing
