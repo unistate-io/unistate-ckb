@@ -12,7 +12,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["Cupnfish <cupnfish@icloud.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/unistate-io/unistate-ckb"
@@ -35,7 +35,7 @@ figment = "0.10"
 futures = "0.3"
 hex = "0.4.3"
 hex-literal = "1.0"
-jsonrpsee = "0.25"
+jsonrpsee = "0.26"
 molecule = "0.9"
 rand = "0.9"
 rayon = "1.0"
@@ -48,7 +48,7 @@ tokio = { version = "1.47", default-features = false }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-test = "0.2"
-redb = "2.6"
+redb = "3.0"
 bincode = "2.0"
 clap = "4.5"
 parking_lot = "0.12"

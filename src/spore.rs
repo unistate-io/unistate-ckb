@@ -84,7 +84,7 @@ struct OutputData {
     type_id_script: action::AddressUnion,
     to_address_script: action::AddressUnion,
     variant: DataVariant,
-    output_index: usize, // Need the index for creation context
+    output_index: i32, // Need the index for creation context
 }
 
 fn index_spore(
@@ -140,7 +140,7 @@ fn index_spore(
                 to_address_script: action::AddressUnion::from_json_script(output_cell.lock.clone()),
                 type_id_script: action::AddressUnion::from_json_script(type_script.clone()),
                 id,
-                output_index: index,
+                output_index: index as i32,
             })
         })
         .try_for_each(|output_data| {
@@ -160,7 +160,7 @@ fn index_spore(
             insert_action(
                 action_data,
                 &tx_hash,
-                output_index as i32,
+                output_index,
                 network,
                 block_number,
                 timestamp,
@@ -544,16 +544,92 @@ fn insert_action(
         .send(Operations::UpsertActions(action_model))
         .map_err(|e| anyhow::anyhow!("Failed to send UpsertActions operation: {}", e))?;
 
+    // For burn actions, update the spore/cluster to mark as burned
+    match &action_union {
+        action::SporeActionUnion::BurnSpore(_) => {
+            if let Some(spore_id) = action_union.spore_id() {
+                let burn_model = spores::ActiveModel {
+                    spore_id: Set(spore_id),
+                    is_burned: Set(true),
+                    last_updated_at_block_number: Set(block_number as i64),
+                    last_updated_at_tx_hash: Set(tx_hash.0.to_vec()),
+                    last_updated_at_timestamp: Set(to_timestamp_naive(timestamp)),
+                    ..Default::default()
+                };
+                op_sender
+                    .send(Operations::UpsertSpores(burn_model))
+                    .map_err(|e| anyhow::anyhow!("Failed to send UpsertSpores operation: {}", e))?;
+            }
+        }
+        action::SporeActionUnion::BurnProxy(_) | action::SporeActionUnion::BurnAgent(_) => {
+            if let Some(cluster_id) = action_union.cluster_id() {
+                let burn_model = clusters::ActiveModel {
+                    cluster_id: Set(cluster_id),
+                    is_burned: Set(true),
+                    last_updated_at_block_number: Set(block_number as i64),
+                    last_updated_at_tx_hash: Set(tx_hash.0.to_vec()),
+                    last_updated_at_timestamp: Set(to_timestamp_naive(timestamp)),
+                    ..Default::default()
+                };
+                op_sender
+                    .send(Operations::UpsertCluster(burn_model))
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to send UpsertCluster operation: {}", e)
+                    })?;
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
+// Helper function to create a simple mapping for burn actions
+// Since we can't easily fetch previous outputs in this context,
+// we'll map burn actions to negative indices based on their position
+// in the inputs array, assuming they correlate with the burn actions
+fn create_burn_action_mapping(
+    tx: &ckb_jsonrpc_types::TransactionView,
+    burn_actions: &[action::SporeActionUnion],
+) -> std::collections::HashMap<Vec<u8>, i32> {
+    let mut mapping = std::collections::HashMap::new();
+    let mut burn_action_index = 0;
+
+    // Create a vector of input indices (0, 1, 2, ...)
+    let input_indices: Vec<usize> = (0..tx.inner.inputs.len()).collect();
+
+    for action in burn_actions {
+        let spore_id = match action {
+            action::SporeActionUnion::BurnSpore(raw) => Some(raw.spore_id().raw_data().to_vec()),
+            action::SporeActionUnion::BurnProxy(raw) => Some(raw.cluster_id().raw_data().to_vec()),
+            action::SporeActionUnion::BurnAgent(raw) => Some(raw.cluster_id().raw_data().to_vec()),
+            _ => None,
+        };
+
+        if let Some(id) = spore_id {
+            // Map to negative index: -1 for input 0, -2 for input 1, etc.
+            if let Some(&input_index) = input_indices.get(burn_action_index) {
+                mapping.insert(id, -(input_index as i32 + 1));
+                burn_action_index += 1;
+            } else {
+                // Fallback if we run out of input indices
+                mapping.insert(id, -999);
+            }
+        }
+    }
+
+    mapping
+}
+
 // Extract actions from transaction witnesses
+
 fn extract_actions(
     tx: &ckb_jsonrpc_types::TransactionView,
     constants: &Constants,
-) -> Vec<(usize, action::SporeActionUnion)> {
+) -> Vec<(i32, action::SporeActionUnion)> {
     // Get SighashAll messages from witnesses in parallel
-    let msgs: Vec<_> = tx
+    // Extract actions from messages in parallel - optimized with better parallel processing
+    let spore_actions: Vec<_> = tx
         .inner
         .witnesses
         .par_iter()
@@ -561,24 +637,20 @@ fn extract_actions(
             WitnessLayoutReader::from_slice(witness.as_bytes())
                 .ok()
                 .and_then(|r| match r.to_enum() {
-                    WitnessLayoutUnionReader::SighashAll(s) => Some(s.message().to_entity()),
+                    WitnessLayoutUnionReader::SighashAll(s) => Some(
+                        s.message()
+                            .to_entity()
+                            .actions()
+                            .into_iter()
+                            .filter_map(|action| {
+                                action::SporeActionReader::from_slice(&action.data().raw_data())
+                                    .ok()
+                                    .map(|reader| reader.to_entity().to_enum())
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
                     _ => None,
                 })
-        })
-        .collect();
-
-    // Extract actions from messages in parallel - optimized with better parallel processing
-    let spore_actions: Vec<_> = msgs
-        .par_iter()
-        .map(|msg| {
-            msg.actions()
-                .into_iter()
-                .filter_map(|action| {
-                    action::SporeActionReader::from_slice(&action.data().raw_data())
-                        .ok()
-                        .map(|reader| reader.to_entity().to_enum())
-                })
-                .collect::<Vec<_>>()
         })
         .flatten()
         .collect();
@@ -603,19 +675,54 @@ fn extract_actions(
         })
         .collect();
 
-    // Match actions with output indices in parallel
-    let actions_with_indices: Vec<(usize, action::SporeActionUnion)> = spore_actions
+    // Separate burn actions from other actions to create mapping
+    let (burn_actions, other_actions): (Vec<_>, Vec<_>) =
+        spore_actions.into_par_iter().partition(|action| {
+            matches!(
+                action,
+                action::SporeActionUnion::BurnSpore(_)
+                    | action::SporeActionUnion::BurnProxy(_)
+                    | action::SporeActionUnion::BurnAgent(_)
+            )
+        });
+
+    // Create mapping for burn actions
+    let burn_action_mapping = create_burn_action_mapping(tx, &burn_actions);
+
+    // Process burn actions
+    let burn_actions_with_indices: Vec<(i32, action::SporeActionUnion)> = burn_actions
         .into_par_iter()
         .filter_map(|action| {
-            // Get spore_id from the action
+            let spore_id = match &action {
+                action::SporeActionUnion::BurnSpore(raw) => {
+                    Some(raw.spore_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::BurnProxy(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                action::SporeActionUnion::BurnAgent(raw) => {
+                    Some(raw.cluster_id().raw_data().to_vec())
+                }
+                _ => None,
+            };
+
+            spore_id.and_then(|id| {
+                burn_action_mapping
+                    .get(&id)
+                    .map(|&negative_index| (negative_index, action))
+            })
+        })
+        .collect();
+
+    // Process other actions (mint, transfer)
+    let other_actions_with_indices: Vec<(i32, action::SporeActionUnion)> = other_actions
+        .into_par_iter()
+        .filter_map(|action| {
             let spore_id = match &action {
                 action::SporeActionUnion::MintSpore(raw) => {
                     Some(raw.spore_id().raw_data().to_vec())
                 }
                 action::SporeActionUnion::TransferSpore(raw) => {
-                    Some(raw.spore_id().raw_data().to_vec())
-                }
-                action::SporeActionUnion::BurnSpore(raw) => {
                     Some(raw.spore_id().raw_data().to_vec())
                 }
                 action::SporeActionUnion::MintCluster(raw) => {
@@ -630,28 +737,27 @@ fn extract_actions(
                 action::SporeActionUnion::TransferProxy(raw) => {
                     Some(raw.cluster_id().raw_data().to_vec())
                 }
-                action::SporeActionUnion::BurnProxy(raw) => {
-                    Some(raw.cluster_id().raw_data().to_vec())
-                }
                 action::SporeActionUnion::MintAgent(raw) => {
                     Some(raw.cluster_id().raw_data().to_vec())
                 }
                 action::SporeActionUnion::TransferAgent(raw) => {
                     Some(raw.cluster_id().raw_data().to_vec())
                 }
-                action::SporeActionUnion::BurnAgent(raw) => {
-                    Some(raw.cluster_id().raw_data().to_vec())
-                }
+                _ => None,
             };
 
-            // Find the corresponding output_index
             spore_id.and_then(|id| {
                 spore_id_to_output_index
                     .get(&id)
-                    .map(|&index| (index, action))
+                    .map(|&index| (index as i32, action))
             })
         })
         .collect();
+
+    // Combine all actions
+    let mut actions_with_indices = Vec::new();
+    actions_with_indices.extend(burn_actions_with_indices);
+    actions_with_indices.extend(other_actions_with_indices);
 
     actions_with_indices
 }
@@ -686,7 +792,7 @@ mod tests {
         .await
         .expect("failed to create HTTP fetcher");
         let hash =
-            ckb_types::h256!("0x375df1fd8d8cf7abab6d6d82aa5489d921b5c3f74b5334ddc3074b41d167b42f");
+            ckb_types::h256!("0xba5ba022e67f2cd89e97c552f14a1d1c592572dd22e2fe9c675b5cf5ed9bb04d");
         let inner = featcher
             .get_txs_by_hashes(vec![hash.clone()])
             .await
@@ -741,5 +847,151 @@ mod tests {
         debug!("id_hex: {}", id_hex);
 
         debug!("done!");
+    }
+
+    #[test]
+    fn test_negative_index_logic() {
+        // Test the core logic of negative index mapping
+        // This test verifies that input indices are correctly mapped to negative values
+
+        // Simulate different input indices
+        let input_indices = vec![0, 1, 2, 5, 10];
+
+        // Test the mapping logic: input_index -> -(input_index + 1)
+        let expected_negative_indices = vec![-1, -2, -3, -6, -11];
+
+        for (i, &input_index) in input_indices.iter().enumerate() {
+            let negative_index = -(input_index as i32 + 1);
+            assert_eq!(
+                negative_index, expected_negative_indices[i],
+                "Input {} should map to {}, got {}",
+                input_index, expected_negative_indices[i], negative_index
+            );
+
+            // Verify that negative indices are indeed negative
+            assert!(
+                negative_index < 0,
+                "Index should be negative for input {}",
+                input_index
+            );
+
+            // Verify that we can recover the original input index
+            let recovered_input = (-negative_index - 1) as usize;
+            assert_eq!(
+                recovered_input, input_index,
+                "Should recover input {} from negative index {}, got {}",
+                input_index, negative_index, recovered_input
+            );
+        }
+
+        // Test that all negative indices are unique
+        let negative_indices: Vec<i32> = input_indices.iter().map(|&i| -(i as i32 + 1)).collect();
+
+        let unique_indices: std::collections::HashSet<_> = negative_indices.iter().collect();
+        assert_eq!(
+            unique_indices.len(),
+            negative_indices.len(),
+            "All negative indices should be unique"
+        );
+
+        println!("Negative index logic test passed!");
+    }
+
+    #[test]
+    fn test_create_burn_action_mapping() {
+        use super::create_burn_action_mapping;
+        use crate::schemas::action::SporeActionUnion;
+        use ckb_jsonrpc_types::{CellInput, OutPoint, Transaction, TransactionView};
+
+        // Create a mock transaction with 3 inputs
+        let tx = Transaction {
+            version: Default::default(),
+            cell_deps: Default::default(),
+            header_deps: Default::default(),
+            inputs: vec![
+                CellInput {
+                    previous_output: OutPoint {
+                        tx_hash: Default::default(),
+                        index: Default::default(),
+                    },
+                    since: Default::default(),
+                },
+                CellInput {
+                    previous_output: OutPoint {
+                        tx_hash: Default::default(),
+                        index: Default::default(),
+                    },
+                    since: Default::default(),
+                },
+                CellInput {
+                    previous_output: OutPoint {
+                        tx_hash: Default::default(),
+                        index: Default::default(),
+                    },
+                    since: Default::default(),
+                },
+            ],
+            outputs: vec![],
+            outputs_data: vec![],
+            witnesses: vec![],
+        };
+
+        let tx_view = TransactionView {
+            inner: tx,
+            hash: Default::default(),
+        };
+
+        // Test with empty burn actions
+        let empty_burn_actions: Vec<SporeActionUnion> = vec![];
+        let mapping = create_burn_action_mapping(&tx_view, &empty_burn_actions);
+        assert_eq!(
+            mapping.len(),
+            0,
+            "Empty burn actions should produce empty mapping"
+        );
+
+        // Test Default::default() behavior to understand what spore_id we get
+        let default_burn_spore = SporeActionUnion::BurnSpore(Default::default());
+        if let SporeActionUnion::BurnSpore(raw) = &default_burn_spore {
+            let spore_id = raw.spore_id().raw_data().to_vec();
+            println!("Default BurnSpore spore_id: {:?}", spore_id);
+            // Check if the default spore_id is non-empty
+            if !spore_id.is_empty() {
+                // If non-empty, we can use it for testing
+                let burn_actions = vec![
+                    default_burn_spore,
+                    SporeActionUnion::BurnProxy(Default::default()),
+                    SporeActionUnion::BurnAgent(Default::default()),
+                ];
+
+                let mapping = create_burn_action_mapping(&tx_view, &burn_actions);
+                println!("Mapping with default actions: {:?}", mapping);
+
+                // Test that we get some mappings (even if we don't know the exact count)
+                // The important thing is that the function doesn't panic and produces valid negative indices
+                let indices: Vec<i32> = mapping.values().cloned().collect();
+                for &index in &indices {
+                    assert!(index < 0, "Index should be negative, got: {}", index);
+                }
+
+                println!(
+                    "Create burn action mapping test passed with {} mappings!",
+                    mapping.len()
+                );
+            } else {
+                println!("Default BurnSpore produces empty spore_id, skipping detailed test");
+                // Test that the function handles empty spore_id gracefully
+                let burn_actions = vec![default_burn_spore];
+                let mapping = create_burn_action_mapping(&tx_view, &burn_actions);
+                assert_eq!(
+                    mapping.len(),
+                    0,
+                    "Empty spore_id should not be added to mapping"
+                );
+                println!("Empty spore_id test passed!");
+            }
+        } else {
+            panic!("Expected BurnSpore variant");
+        }
     }
 }

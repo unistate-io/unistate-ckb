@@ -16,7 +16,7 @@ use jsonrpsee::{
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 pub use redb::Database;
 pub use redb::Error as RedbError;
-use redb::{ReadableTable as _, TableDefinition};
+use redb::{ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
