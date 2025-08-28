@@ -28,6 +28,9 @@ pub enum Operations {
     UpsertActions(spore_actions::ActiveModel),
     UpsertLock(rgbpp_locks::ActiveModel),
     UpsertUnlock(rgbpp_unlocks::ActiveModel),
+    // New operation types for burn operations
+    BurnSpore(spores::ActiveModel),
+    BurnCluster(clusters::ActiveModel),
 }
 
 macro_rules! define_conflict {
@@ -263,6 +266,50 @@ macro_rules! process_operations {
     };
 }
 
+macro_rules! define_update_burn_function {
+    ($fn_name:ident, $entity:ident, $entity_name_str:expr) => {
+        async fn $fn_name(
+            buffer: Vec<$entity::ActiveModel>,
+            db: &sea_orm::DatabaseTransaction,
+        ) -> Result<(), anyhow::Error> {
+            let futs = buffer
+                .into_par_iter()
+                .map(|model| async move {
+                    let mut retry_count = 0;
+                    loop {
+                        match $entity::Entity::update(model.clone()).exec(db).await {
+                            Ok(val) => break Ok(val),
+                            Err(DbErr::RecordNotInserted) if retry_count < MAX_RETRIES => {
+                                retry_count += 1;
+                                tracing::warn!(
+                                    "Update failed, attempting retry {}/{}",
+                                    retry_count,
+                                    MAX_RETRIES
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    RETRY_DELAY_MS,
+                                ))
+                                .await;
+                            }
+                            Err(e) => break Err(e),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let counters = futures::future::try_join_all(futs).await?;
+            let counter = counters.into_par_iter().count();
+
+            tracing::info!("updated {} {}", counter, $entity_name_str);
+
+            Ok(())
+        }
+    };
+}
+
+define_update_burn_function!(update_many_burn_spores, spores, "spores");
+define_update_burn_function!(update_many_burn_clusters, clusters, "clusters");
+
 impl DatabaseProcessor {
     pub fn new(
         db: DbConn,
@@ -311,6 +358,10 @@ impl DatabaseProcessor {
             },
             3 => {
                 UpsertActions => (actions_vec, upsert_many_actions)
+            },
+            4 => {
+                BurnSpore => (burn_spore_vec, update_many_burn_spores),
+                BurnCluster => (burn_cluster_vec, update_many_burn_clusters)
             }
         };
 

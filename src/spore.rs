@@ -545,7 +545,7 @@ fn insert_action(
         .send(Operations::UpsertActions(action_model))
         .map_err(|e| anyhow::anyhow!("Failed to send UpsertActions operation: {}", e))?;
 
-    // For burn actions, update the spore/cluster to mark as burned
+    // For burn actions, update the spore/cluster to mark as burned using UpdateMany
     match &action_union {
         action::SporeActionUnion::BurnSpore(_) => {
             if let Some(spore_id) = action_union.spore_id() {
@@ -566,8 +566,8 @@ fn insert_action(
                     created_at_timestamp: NotSet,
                 };
                 op_sender
-                    .send(Operations::UpsertSpores(burn_model))
-                    .map_err(|e| anyhow::anyhow!("Failed to send UpsertSpores operation: {}", e))?;
+                    .send(Operations::BurnSpore(burn_model))
+                    .map_err(|e| anyhow::anyhow!("Failed to send BurnSpore operation: {}", e))?;
             }
         }
         action::SporeActionUnion::BurnProxy(_) | action::SporeActionUnion::BurnAgent(_) => {
@@ -589,10 +589,8 @@ fn insert_action(
                     created_at_timestamp: NotSet,
                 };
                 op_sender
-                    .send(Operations::UpsertCluster(burn_model))
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to send UpsertCluster operation: {}", e)
-                    })?;
+                    .send(Operations::BurnCluster(burn_model))
+                    .map_err(|e| anyhow::anyhow!("Failed to send BurnCluster operation: {}", e))?;
             }
         }
         _ => {}
