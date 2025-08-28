@@ -3843,7 +3843,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "unistate-celldep_height_finder"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "ckb-jsonrpc-types",
  "prettytable-rs",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "unistate-ckb"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-scoped",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "unistate-constants"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "ckb-fixed-hash-core",
  "ckb-jsonrpc-types",
@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "unistate-fetcher"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "bincode",
  "ckb-jsonrpc-types",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "unistate-utils"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "bech32",
  "ckb-fixed-hash-core",

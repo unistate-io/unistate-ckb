@@ -132,6 +132,9 @@ define_upsert_functions! {
                 clusters::Column::ClusterDescription,
                 clusters::Column::MutantId,
                 clusters::Column::IsBurned,
+                clusters::Column::TypeAddressId,
+                clusters::Column::LastUpdatedAtBlockNumber,
+                clusters::Column::LastUpdatedAtTxHash,
                 clusters::Column::LastUpdatedAtTimestamp
             ]
         ),
@@ -147,6 +150,9 @@ define_upsert_functions! {
                 spores::Column::Content,
                 spores::Column::ClusterId,
                 spores::Column::IsBurned,
+                spores::Column::TypeAddressId,
+                spores::Column::LastUpdatedAtBlockNumber,
+                spores::Column::LastUpdatedAtTxHash,
                 spores::Column::LastUpdatedAtTimestamp
             ]
         ),
@@ -328,39 +334,168 @@ impl DatabaseProcessor {
     }
 }
 
-macro_rules! merge_models {
-    ($fn_name:ident, $model:ident, $id_field:ident, $timestamp_field:ident) => {
-        fn $fn_name(items: Vec<$model::ActiveModel>) -> Vec<$model::ActiveModel> {
-            use sea_orm::ActiveValue::Set;
+fn merge_clusters(items: Vec<clusters::ActiveModel>) -> Vec<clusters::ActiveModel> {
+    use sea_orm::ActiveValue::Set;
 
-            let unique_items = dashmap::DashMap::<Vec<u8>, $model::ActiveModel>::new();
+    let unique_items = dashmap::DashMap::<Vec<u8>, clusters::ActiveModel>::new();
 
-            items.into_par_iter().for_each(|item| {
-                if let Set(ref id) = item.$id_field {
-                    if !unique_items.contains_key(id)
-                        || unique_items
-                            .get(id)
-                            .unwrap()
-                            .$timestamp_field
-                            .try_as_ref()
-                            .unwrap()
-                            < item.$timestamp_field.try_as_ref().unwrap()
+    items.into_par_iter().for_each(|item| {
+        if let Set(ref id) = item.cluster_id {
+            // Check if this is a burn operation (is_burned is set to true)
+            let is_burn_operation = matches!(item.is_burned, Set(true));
+
+            unique_items
+                .entry(id.clone())
+                .and_modify(|existing| {
+                    // Only update if the new item has a newer timestamp
+                    if existing.last_updated_at_timestamp.try_as_ref().unwrap()
+                        < item.last_updated_at_timestamp.try_as_ref().unwrap()
                     {
-                        unique_items.insert(id.clone(), item);
+                        if is_burn_operation {
+                            // For burn operations, only update the burn flag and timestamp fields
+                            // This preserves all other existing data
+                            if let Set(ref val) = item.is_burned {
+                                existing.is_burned = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_block_number {
+                                existing.last_updated_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_tx_hash {
+                                existing.last_updated_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.last_updated_at_timestamp {
+                                existing.last_updated_at_timestamp = Set(*val);
+                            }
+                        } else {
+                            // For non-burn operations, update all set fields
+                            if let Set(ref val) = item.cluster_name {
+                                existing.cluster_name = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.cluster_description {
+                                existing.cluster_description = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.mutant_id {
+                                existing.mutant_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.owner_address_id {
+                                existing.owner_address_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.type_address_id {
+                                existing.type_address_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.is_burned {
+                                existing.is_burned = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_block_number {
+                                existing.created_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_tx_hash {
+                                existing.created_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.created_at_output_index {
+                                existing.created_at_output_index = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_timestamp {
+                                existing.created_at_timestamp = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_block_number {
+                                existing.last_updated_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_tx_hash {
+                                existing.last_updated_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.last_updated_at_timestamp {
+                                existing.last_updated_at_timestamp = Set(*val);
+                            }
+                        }
                     }
-                }
-            });
-
-            let (_, results) = unique_items.into_par_iter().unzip::<_, _, Vec<_>, Vec<_>>();
-            results
+                })
+                .or_insert_with(|| item);
         }
-    };
+    });
+
+    unique_items.into_par_iter().map(|(_, v)| v).collect()
 }
 
-merge_models!(
-    merge_clusters,
-    clusters,
-    cluster_id,
-    last_updated_at_timestamp
-);
-merge_models!(merge_spores, spores, spore_id, last_updated_at_timestamp);
+fn merge_spores(items: Vec<spores::ActiveModel>) -> Vec<spores::ActiveModel> {
+    use sea_orm::ActiveValue::Set;
+
+    let unique_items = dashmap::DashMap::<Vec<u8>, spores::ActiveModel>::new();
+
+    items.into_par_iter().for_each(|item| {
+        if let Set(ref id) = item.spore_id {
+            // Check if this is a burn operation (is_burned is set to true)
+            let is_burn_operation = matches!(item.is_burned, Set(true));
+
+            unique_items
+                .entry(id.clone())
+                .and_modify(|existing| {
+                    // Only update if the new item has a newer timestamp
+                    if existing.last_updated_at_timestamp.try_as_ref().unwrap()
+                        < item.last_updated_at_timestamp.try_as_ref().unwrap()
+                    {
+                        if is_burn_operation {
+                            // For burn operations, only update the burn flag and timestamp fields
+                            // This preserves all other existing data
+                            if let Set(ref val) = item.is_burned {
+                                existing.is_burned = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_block_number {
+                                existing.last_updated_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_tx_hash {
+                                existing.last_updated_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.last_updated_at_timestamp {
+                                existing.last_updated_at_timestamp = Set(*val);
+                            }
+                        } else {
+                            // For non-burn operations, update all set fields
+                            if let Set(ref val) = item.content_type {
+                                existing.content_type = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.content {
+                                existing.content = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.cluster_id {
+                                existing.cluster_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.owner_address_id {
+                                existing.owner_address_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.type_address_id {
+                                existing.type_address_id = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.is_burned {
+                                existing.is_burned = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_block_number {
+                                existing.created_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_tx_hash {
+                                existing.created_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.created_at_output_index {
+                                existing.created_at_output_index = Set(*val);
+                            }
+                            if let Set(ref val) = item.created_at_timestamp {
+                                existing.created_at_timestamp = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_block_number {
+                                existing.last_updated_at_block_number = Set(*val);
+                            }
+                            if let Set(ref val) = item.last_updated_at_tx_hash {
+                                existing.last_updated_at_tx_hash = Set(val.clone());
+                            }
+                            if let Set(ref val) = item.last_updated_at_timestamp {
+                                existing.last_updated_at_timestamp = Set(*val);
+                            }
+                        }
+                    }
+                })
+                .or_insert_with(|| item);
+        }
+    });
+
+    unique_items.into_par_iter().map(|(_, v)| v).collect()
+}

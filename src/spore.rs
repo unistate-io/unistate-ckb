@@ -7,6 +7,7 @@ use rayon::iter::{
 };
 use rayon::slice::ParallelSlice as _;
 
+use sea_orm::ActiveValue::NotSet;
 use sea_orm::{Set, prelude::Json};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -554,7 +555,15 @@ fn insert_action(
                     last_updated_at_block_number: Set(block_number as i64),
                     last_updated_at_tx_hash: Set(tx_hash.0.to_vec()),
                     last_updated_at_timestamp: Set(to_timestamp_naive(timestamp)),
-                    ..Default::default()
+                    content_type: NotSet,
+                    content: NotSet,
+                    cluster_id: NotSet,
+                    owner_address_id: NotSet,
+                    type_address_id: NotSet,
+                    created_at_block_number: NotSet,
+                    created_at_tx_hash: NotSet,
+                    created_at_output_index: NotSet,
+                    created_at_timestamp: NotSet,
                 };
                 op_sender
                     .send(Operations::UpsertSpores(burn_model))
@@ -569,7 +578,15 @@ fn insert_action(
                     last_updated_at_block_number: Set(block_number as i64),
                     last_updated_at_tx_hash: Set(tx_hash.0.to_vec()),
                     last_updated_at_timestamp: Set(to_timestamp_naive(timestamp)),
-                    ..Default::default()
+                    cluster_name: NotSet,
+                    cluster_description: NotSet,
+                    mutant_id: NotSet,
+                    owner_address_id: NotSet,
+                    type_address_id: NotSet,
+                    created_at_block_number: NotSet,
+                    created_at_tx_hash: NotSet,
+                    created_at_output_index: NotSet,
+                    created_at_timestamp: NotSet,
                 };
                 op_sender
                     .send(Operations::UpsertCluster(burn_model))
@@ -776,9 +793,11 @@ mod tests {
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn debug_index_spore() {
+        use tracing::{debug, info, warn};
         let urls = vec![
             "https://mainnet.ckbapp.dev/".to_string(),
             "https://mainnet.ckb.dev/".to_string(),
+            "https://ckb-rpc.wamo.club".to_string(),
         ];
 
         let featcher = fetcher::HttpFetcher::http_client(
