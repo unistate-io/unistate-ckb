@@ -398,17 +398,9 @@ fn index_xudt(
         .enumerate()
         .filter_map(|(idx, p)| {
             debug!("Parsing output index {}: type={:?}", idx, p.0.type_);
+
+            // 首先检查是否是UNIQUE类型（保持原有逻辑）
             if p.0
-                .type_
-                .as_ref()
-                .map(|t| constants.is_xudt_type(t))
-                .unwrap_or(false)
-            {
-                debug!("Output {} is XUDT type", idx);
-                let xudt = parse_xudt(p, &xudt_witness_input);
-                xudt.map(|xudt| (XudtParseResult::Xudt(xudt), idx))
-            } else if p
-                .0
                 .type_
                 .as_ref()
                 .map(|t| constants.is_unique_type(t))
@@ -427,8 +419,23 @@ fn index_xudt(
                         None
                     }
                 }
+            }
+            // 然后尝试解析为XUDT（新逻辑：不再依赖预定义的is_xudt_type）
+            else if p.0.type_.is_some() {
+                debug!("Attempting to parse output {} as XUDT", idx);
+                let xudt = parse_xudt(p, &xudt_witness_input);
+                match xudt {
+                    Some(xudt) => {
+                        debug!("Output {} successfully parsed as XUDT", idx);
+                        Some((XudtParseResult::Xudt(xudt), idx))
+                    }
+                    None => {
+                        debug!("Skipping output {} as it's not a valid XUDT", idx);
+                        None
+                    }
+                }
             } else {
-                debug!("Output {} is not XUDT or UNIQUE type", idx);
+                debug!("Output {} has no type script", idx);
                 None
             }
         })
@@ -500,7 +507,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tracing::debug;
 
-    use crate::xudt::index_xudt;
+    use crate::{database::Operations, xudt::index_xudt};
     use constants::Constants;
     #[test]
     #[tracing_test::traced_test]
@@ -524,6 +531,102 @@ mod tests {
             debug!("op: {op:?}");
         }
         debug!("done!");
+    }
+
+    #[tracing_test::traced_test]
+    #[tokio::test]
+    async fn debug_index_xudt_with_fetcher() {
+        use tracing::debug;
+        let urls = vec![
+            "https://mainnet.ckbapp.dev/".to_string(),
+            "https://mainnet.ckb.dev/".to_string(),
+            "https://ckb-rpc.wamo.club".to_string(),
+        ];
+
+        let fetcher = fetcher::HttpFetcher::http_client(
+            urls,
+            std::time::Duration::from_secs(600), // evaluation_interval
+            5,                                   // call_max_retries
+            std::time::Duration::from_millis(500), // call_retry_interval
+            100 * 1024 * 1024,                   // max_response_size
+            100 * 1024 * 1024,                   // max_request_size
+        )
+        .await
+        .expect("failed to create HTTP fetcher");
+
+        // Use a known XUDT transaction hash for testing
+        let hash =
+            ckb_types::h256!("0xf7f47c348720b2703df89a9fedc38d86b47e4ac515367cbcc4b2c4dfc2221b85");
+
+        let inner = fetcher
+            .get_txs_by_hashes(vec![hash.clone()])
+            .await
+            .expect("failed to fetch transaction")
+            .into_values()
+            .next()
+            .expect("no transaction found in response");
+
+        let tx = TransactionView { inner, hash };
+        debug!("Fetched tx: {tx:?}");
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let network = utils::network::NetworkType::Mainnet;
+        let constants = Constants::Mainnet;
+        let block_number = 0;
+        let timestamp = 0;
+
+        index_xudt(tx, network, constants, block_number, timestamp, sender)
+            .expect("Failed to index XUDT transaction");
+
+        // Process all operations sent during indexing
+        while let Some(op) = receiver.recv().await {
+            match &op {
+                Operations::UpsertXudt(xudt_cell) => {
+                    debug!("UpsertXudt operation: {:?}", xudt_cell);
+                }
+                Operations::UpdateXudtCell(status) => {
+                    debug!("UpdateXudtCell operation: {:?}", status);
+                }
+                Operations::UpsertTokenInfo(token_info) => {
+                    debug!("UpsertTokenInfo operation: {:?}", token_info);
+                }
+                Operations::UpsertAddress(address) => {
+                    debug!("UpsertAddress operation: {:?}", address);
+                }
+                _ => {
+                    debug!("Other operation: {:?}", op);
+                }
+            }
+        }
+
+        debug!("XUDT indexing with fetcher completed successfully!");
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn test_try_parse_xudt() {
+        let constants = Constants::Mainnet;
+        let tx: TransactionView = serde_json::from_str(TEST_JSON).expect("deserialize failed.");
+
+        let (sender, mut recver) = mpsc::unbounded_channel();
+        index_xudt(
+            tx,
+            utils::network::NetworkType::Mainnet,
+            constants,
+            0,
+            0,
+            sender,
+        )
+        .unwrap();
+
+        let mut xudt_count = 0;
+        while let Some(op) = recver.blocking_recv() {
+            if let Operations::UpsertXudt(_) = &op {
+                xudt_count += 1;
+            }
+        }
+
+        assert!(xudt_count > 0, "Should find at least one XUDT cell");
     }
 
     const TEST_JSON: &'static str = r#"
