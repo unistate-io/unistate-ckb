@@ -217,12 +217,14 @@ impl Constants {
             .into_par_iter()
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
-            || self.usdi_type_dep().out_point.eq(&cd.out_point)
+            || self.usdi_type_dep(Version::V0).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
+            || self.usdi_type_dep(Version::V1).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
     }
 
     #[inline]
     pub fn is_usdi(self, cd: &CellDep) -> bool {
-        self.usdi_type_dep().out_point.eq(&cd.out_point)
+        self.usdi_type_dep(Version::V0).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
+            || self.usdi_type_dep(Version::V1).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
     }
 
     #[inline]
@@ -668,8 +670,9 @@ impl Constants {
         DepType::Code,
         0x0,
         {
-            Testnet => "03d029480416c2fc927dfbfe0ed1916ffaf55d1e1f3146c55cf2d3dd5e674e61",
-            Mainnet => "f6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d"
+            (Testnet, V1) => "aec423c2af7fe844b476333190096b10fc5726e6d9ac58a9b71f71ffac204fee",
+            (Testnet, V0) => "03d029480416c2fc927dfbfe0ed1916ffaf55d1e1f3146c55cf2d3dd5e674e61",
+            (Mainnet, V0) => "f6a5eef65101899db9709c8de1cc28f23c1bee90d857ebe176f6647ef109e20d"
         }
     );
 }
