@@ -28,31 +28,17 @@ fn to_timestamp_naive(timestamp: u64) -> chrono::NaiveDateTime {
         .naive_utc()
 }
 
-pub struct InscriptionTxContext {
-    pub tx: TransactionView,
-    pub block_number: u64,
-    pub timestamp: u64,
-}
-
-pub fn index_inscription_info_batch(
-    tx_contexts: Vec<InscriptionTxContext>,
+pub fn try_index_inscription_transaction(
+    tx: TransactionView,
+    timestamp: u64,
+    block_number: u64,
     network: NetworkType,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
+    // Try to index as Inscription - if it's not an Inscription transaction, this will return Ok(())
+    // without doing any database operations
     let constants = Constants::from_config(network);
-
-    tx_contexts.into_par_iter().try_for_each(|ctx| {
-        index_inscription_info(
-            ctx.tx,
-            network,
-            constants,
-            ctx.block_number,
-            ctx.timestamp,
-            op_sender.clone(),
-        )
-    })?;
-
-    Ok(())
+    index_inscription_info(tx, network, constants, block_number, timestamp, op_sender)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

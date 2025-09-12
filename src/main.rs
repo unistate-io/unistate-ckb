@@ -27,7 +27,6 @@ mod entity;
 #[allow(clippy::all)]
 mod schemas;
 
-mod categorization;
 mod config;
 mod database;
 mod error;
@@ -36,6 +35,7 @@ mod index;
 mod inscription;
 mod rgbpp;
 mod spore;
+mod transaction_context;
 mod unique;
 mod xudt;
 

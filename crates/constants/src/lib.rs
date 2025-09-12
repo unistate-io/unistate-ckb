@@ -217,14 +217,25 @@ impl Constants {
             .into_par_iter()
             .flatten()
             .any(|dep| dep.out_point.eq(&cd.out_point))
-            || self.usdi_type_dep(Version::V0).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
-            || self.usdi_type_dep(Version::V1).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
+            || self
+                .usdi_type_dep(Version::V0)
+                .map(|dep| dep.out_point.eq(&cd.out_point))
+                .unwrap_or(false)
+            || self
+                .usdi_type_dep(Version::V1)
+                .map(|dep| dep.out_point.eq(&cd.out_point))
+                .unwrap_or(false)
     }
 
     #[inline]
     pub fn is_usdi(self, cd: &CellDep) -> bool {
-        self.usdi_type_dep(Version::V0).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
-            || self.usdi_type_dep(Version::V1).map(|dep| dep.out_point.eq(&cd.out_point)).unwrap_or(false)
+        self.usdi_type_dep(Version::V0)
+            .map(|dep| dep.out_point.eq(&cd.out_point))
+            .unwrap_or(false)
+            || self
+                .usdi_type_dep(Version::V1)
+                .map(|dep| dep.out_point.eq(&cd.out_point))
+                .unwrap_or(false)
     }
 
     #[inline]

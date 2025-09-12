@@ -317,31 +317,15 @@ fn parse_xudt(
     })
 }
 
-pub struct XudtTxContext {
-    pub tx: TransactionView,
-    pub block_number: u64,
-    pub timestamp: u64,
-}
-
-pub fn index_xudt_transactions(
-    tx_contexts: Vec<XudtTxContext>,
+pub fn try_index_xudt_transaction(
+    tx: TransactionView,
+    timestamp: u64,
+    block_number: u64,
     network: NetworkType,
+    constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
-    let constants = Constants::from_config(network);
-
-    tx_contexts.into_par_iter().try_for_each(|ctx| {
-        index_xudt(
-            ctx.tx,
-            network,
-            constants,
-            ctx.block_number,
-            ctx.timestamp,
-            op_sender.clone(),
-        )
-    })?;
-
-    Ok(())
+    index_xudt(tx, network, constants, block_number, timestamp, op_sender)
 }
 
 enum XudtParseResult {

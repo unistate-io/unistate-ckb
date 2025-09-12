@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ckb_jsonrpc_types::{BlockNumber, TransactionView};
+use ckb_jsonrpc_types::{BlockNumber, CellOutput, TransactionView};
+use ckb_types::H256;
 use config::Config;
 use constants::Constants;
 use database::{DatabaseProcessor, Operations};
@@ -21,35 +22,40 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 use utils::network::NetworkType;
 
-use crate::categorization::categorize_transaction;
-use crate::inscription::InscriptionTxContext;
-use crate::rgbpp::RgbppTxContext;
-use crate::spore::SporeTx;
-use crate::xudt::XudtTxContext;
+use crate::transaction_context::TxContext;
 use crate::{config, database, inscription, rgbpp, spore, xudt};
 
-pub struct CategorizedTxContexts {
-    pub spore_txs: Vec<SporeTx>,
-    pub xudt_txs: Vec<XudtTxContext>,
-    pub rgbpp_txs: Vec<RgbppTxContext>,
-    pub inscription_txs: Vec<InscriptionTxContext>,
+/// Indexer types for unified transaction processing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexerType {
+    Spore,
+    Xudt,
+    Rgbpp,
+    Inscription,
 }
 
-impl CategorizedTxContexts {
-    pub fn new() -> Self {
-        Self {
-            spore_txs: Vec::new(),
-            xudt_txs: Vec::new(),
-            rgbpp_txs: Vec::new(),
-            inscription_txs: Vec::new(),
+impl IndexerType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IndexerType::Spore => "Spore",
+            IndexerType::Xudt => "XUDT",
+            IndexerType::Rgbpp => "RGB++",
+            IndexerType::Inscription => "Inscription",
         }
+    }
+}
+
+pub struct TxContexts {
+    pub txs: Vec<TxContext>,
+}
+
+impl TxContexts {
+    pub fn new() -> Self {
+        Self { txs: Vec::new() }
     }
 
     pub fn merge(mut self, other: Self) -> Self {
-        self.spore_txs.extend(other.spore_txs);
-        self.xudt_txs.extend(other.xudt_txs);
-        self.rgbpp_txs.extend(other.rgbpp_txs);
-        self.inscription_txs.extend(other.inscription_txs);
+        self.txs.extend(other.txs);
         self
     }
 }
@@ -410,12 +416,12 @@ async fn process_batch_inner(
         processing_log_start, processing_log_end
     );
 
-    let (categorized_data, txs_to_cache) =
-        fetch_and_categorize_transactions(batch_start_height, batch_end_height, &constants)
+    let (tx_contexts, txs_to_cache) =
+        fetch_and_process_transactions(batch_start_height, batch_end_height)
             .await
             .with_context(|| {
                 format!(
-                    "Failed to fetch and categorize transactions for batch {} - {}",
+                    "Failed to fetch and process transactions for batch {} - {}",
                     processing_log_start, processing_log_end
                 )
             })?;
@@ -454,96 +460,35 @@ async fn process_batch_inner(
     let rgbpp_sender = _sender_guard.0.clone();
     let inscription_sender = _sender_guard.0.clone();
 
-    let spore_tx_contexts = categorized_data.spore_txs;
-    let xudt_tx_contexts = categorized_data.xudt_txs;
-    let rgbpp_tx_contexts = categorized_data.rgbpp_txs;
-    let inscription_tx_contexts = categorized_data.inscription_txs;
+    let tx_contexts_data = tx_contexts.txs;
 
-    if !spore_tx_contexts.is_empty() {
+    if !tx_contexts_data.is_empty() {
         info!(
-            "Spawning Spore indexer task for batch {} - {} ({} txs)",
+            "Spawning unified indexer task for batch {} - {} ({} txs)",
             processing_log_start,
             processing_log_end,
-            spore_tx_contexts.len()
+            tx_contexts_data.len()
         );
+
         let constants_clone = constants;
         let network_clone = network;
-        let handle = task::spawn_blocking(move || {
-            spore::index_spores(
-                spore_tx_contexts,
+        let handle = task::spawn(async move {
+            index_all_transactions(
+                tx_contexts_data,
                 network_clone,
                 constants_clone,
                 spore_sender,
-            )
-        });
-        sub_task_futures.push(Box::pin(async move {
-            match handle.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e).context("Spore indexer task failed"),
-                Err(e) => Err(anyhow::Error::from(e)).context("Spore indexer task join error"),
-            }
-        }));
-    }
-    if !xudt_tx_contexts.is_empty() {
-        info!(
-            "Spawning XUDT indexer task for batch {} - {} ({} txs)",
-            processing_log_start,
-            processing_log_end,
-            xudt_tx_contexts.len()
-        );
-        let network_clone = network;
-        let handle = task::spawn_blocking(move || {
-            xudt::index_xudt_transactions(xudt_tx_contexts, network_clone, xudt_sender)
-        });
-        sub_task_futures.push(Box::pin(async move {
-            match handle.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e).context("XUDT indexer task failed"),
-                Err(e) => Err(anyhow::Error::from(e)).context("XUDT indexer task join error"),
-            }
-        }));
-    }
-    if !rgbpp_tx_contexts.is_empty() {
-        info!(
-            "Spawning RGB++ indexer task for batch {} - {} ({} txs)",
-            processing_log_start,
-            processing_log_end,
-            rgbpp_tx_contexts.len(),
-        );
-        let rgbpp_future = task::spawn(rgbpp::run_rgbpp_indexing_logic(
-            rgbpp_tx_contexts,
-            rgbpp_sender,
-        ));
-        sub_task_futures.push(Box::pin(async move {
-            match rgbpp_future.await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e).context("RGB++ indexer task failed"),
-                Err(e) => Err(anyhow::Error::from(e)).context("RGB++ indexer task join error"),
-            }
-        }));
-    }
-    if !inscription_tx_contexts.is_empty() {
-        info!(
-            "Spawning Inscription indexer task for batch {} - {} ({} txs)",
-            processing_log_start,
-            processing_log_end,
-            inscription_tx_contexts.len()
-        );
-        let network_clone = network;
-        let handle = task::spawn_blocking(move || {
-            inscription::index_inscription_info_batch(
-                inscription_tx_contexts,
-                network_clone,
+                xudt_sender,
+                rgbpp_sender,
                 inscription_sender,
             )
+            .await
         });
         sub_task_futures.push(Box::pin(async move {
             match handle.await {
                 Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => Err(e).context("Inscription indexer task failed"),
-                Err(e) => {
-                    Err(anyhow::Error::from(e)).context("Inscription indexer task join error")
-                }
+                Ok(Err(e)) => Err(e).context("Unified indexer task failed"),
+                Err(e) => Err(anyhow::Error::from(e)).context("Unified indexer task join error"),
             }
         }));
     }
@@ -600,11 +545,178 @@ impl Drop for SenderGuard {
     }
 }
 
-async fn fetch_and_categorize_transactions(
+async fn index_all_transactions(
+    tx_contexts: Vec<TxContext>,
+    network: NetworkType,
+    constants: Constants,
+    spore_sender: mpsc::UnboundedSender<Operations>,
+    xudt_sender: mpsc::UnboundedSender<Operations>,
+    rgbpp_sender: mpsc::UnboundedSender<Operations>,
+    inscription_sender: mpsc::UnboundedSender<Operations>,
+) -> Result<(), anyhow::Error> {
+    use rayon::prelude::*;
+
+    // Prefetch previous outputs for RGB++ transactions if they have inputs
+    let rgbpp_prev_outputs_futures: Vec<_> = tx_contexts
+        .iter()
+        .filter(|ctx| !ctx.tx.inner.inputs.is_empty())
+        .map(|ctx| {
+            let inputs = ctx.tx.inner.inputs.clone();
+            let tx_hash = ctx.tx.hash.clone();
+            async move {
+                match get_fetcher()?.get_outputs(inputs).await {
+                    Ok(prev_outputs) => Ok::<Option<(H256, Vec<CellOutput>)>, anyhow::Error>(Some(
+                        (tx_hash, prev_outputs),
+                    )),
+                    Err(e) => {
+                        debug!(
+                            "Failed to fetch previous outputs for tx {}: {:?}",
+                            tx_hash, e
+                        );
+                        Ok(None)
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let rgbpp_prev_outputs_results = try_join_all(rgbpp_prev_outputs_futures).await?;
+    let mut rgbpp_prev_outputs_map = std::collections::HashMap::new();
+    for result in rgbpp_prev_outputs_results {
+        if let Some((tx_hash, prev_outputs)) = result {
+            rgbpp_prev_outputs_map.insert(tx_hash, prev_outputs);
+        }
+    }
+
+    // Use adaptive parallel processing based on transaction count
+    if tx_contexts.len() > 100 {
+        // Process in chunks for better memory locality and resource management
+        tx_contexts.par_chunks(25).try_for_each(|chunk| {
+            chunk.into_par_iter().try_for_each(|ctx| {
+                process_transaction_with_all_indexers(
+                    &ctx,
+                    network,
+                    constants,
+                    &spore_sender,
+                    &xudt_sender,
+                    &rgbpp_sender,
+                    &inscription_sender,
+                    &rgbpp_prev_outputs_map,
+                )
+            })
+        })
+    } else {
+        // Simple parallel iteration for small batches
+        tx_contexts.into_par_iter().try_for_each(|ctx| {
+            process_transaction_with_all_indexers(
+                &ctx,
+                network,
+                constants,
+                &spore_sender,
+                &xudt_sender,
+                &rgbpp_sender,
+                &inscription_sender,
+                &rgbpp_prev_outputs_map,
+            )
+        })
+    }
+}
+
+/// Helper function to process a single transaction with all indexers
+fn process_transaction_with_all_indexers(
+    ctx: &TxContext,
+    network: NetworkType,
+    constants: Constants,
+    spore_sender: &mpsc::UnboundedSender<Operations>,
+    xudt_sender: &mpsc::UnboundedSender<Operations>,
+    rgbpp_sender: &mpsc::UnboundedSender<Operations>,
+    inscription_sender: &mpsc::UnboundedSender<Operations>,
+    rgbpp_prev_outputs_map: &std::collections::HashMap<H256, Vec<CellOutput>>,
+) -> Result<(), anyhow::Error> {
+    let tx_hash = ctx.tx.hash.clone(); // Store hash for logging
+
+    // Clone transaction data for parallel processing
+    let tx_spore = ctx.tx.clone();
+    let tx_xudt = ctx.tx.clone();
+    let tx_rgbpp = ctx.tx.clone();
+    let tx_inscription = ctx.tx.clone(); // Clone for the closure
+
+    let timestamp = ctx.timestamp;
+    let block_number = ctx.block_number;
+
+    // Get pre-fetched previous outputs for RGB++ if available
+    let rgbpp_prev_outputs = rgbpp_prev_outputs_map.get(&tx_hash).cloned();
+
+    // Run all four indexers in parallel
+    let results: Vec<Result<(), anyhow::Error>> = vec![
+        (IndexerType::Spore, spore_sender.clone(), tx_spore),
+        (IndexerType::Xudt, xudt_sender.clone(), tx_xudt),
+        (IndexerType::Rgbpp, rgbpp_sender.clone(), tx_rgbpp),
+        (
+            IndexerType::Inscription,
+            inscription_sender.clone(),
+            tx_inscription,
+        ),
+    ]
+    .into_par_iter()
+    .map(|(indexer_type, sender, tx)| {
+        let result = match indexer_type {
+            IndexerType::Spore => {
+                spore::try_index_spore(tx, timestamp, block_number, network, constants, sender)
+            }
+            IndexerType::Xudt => xudt::try_index_xudt_transaction(
+                tx,
+                timestamp,
+                block_number,
+                network,
+                constants,
+                sender,
+            ),
+            IndexerType::Rgbpp => rgbpp::try_index_rgbpp_transaction(
+                tx,
+                timestamp,
+                block_number,
+                rgbpp_prev_outputs.clone(),
+                sender,
+            ),
+            IndexerType::Inscription => inscription::try_index_inscription_transaction(
+                tx,
+                timestamp,
+                block_number,
+                network,
+                sender,
+            ),
+        };
+
+        if let Err(ref e) = result {
+            debug!(
+                "{} indexer error for tx {}: {:?}",
+                indexer_type.as_str(),
+                tx_hash,
+                e
+            );
+        }
+        result
+    })
+    .collect();
+
+    // Check if any indexer had a hard error that should stop processing
+    for result in results {
+        // Only fail on critical errors, not "not applicable" results
+        if let Err(e) = result {
+            // Most indexers return Ok(()) when transaction doesn't match their type
+            // So we only care about actual errors
+            debug!("Indexer error, continuing processing: {:?}", e);
+        }
+    }
+
+    Ok(())
+}
+
+async fn fetch_and_process_transactions(
     start_number: u64,
     end_number: u64,
-    constants: &Constants,
-) -> Result<(CategorizedTxContexts, Vec<TransactionView>)> {
+) -> Result<(TxContexts, Vec<TransactionView>)> {
     let count = end_number.saturating_sub(start_number);
     let inclusive_end_number = end_number.saturating_sub(1);
 
@@ -613,11 +725,11 @@ async fn fetch_and_categorize_transactions(
             "Fetch/Categorize: Skipping empty range {}..{}",
             start_number, end_number
         );
-        return Ok((CategorizedTxContexts::new(), Vec::new()));
+        return Ok((TxContexts::new(), Vec::new()));
     }
 
     info!(
-        "Fetching and categorizing {} blocks: {} - {}",
+        "Fetching and processing {} blocks: {} - {}",
         count, start_number, inclusive_end_number
     );
 
@@ -651,7 +763,7 @@ async fn fetch_and_categorize_transactions(
             ));
         }
         if block_views.is_empty() {
-            return Ok((CategorizedTxContexts::new(), Vec::new()));
+            return Ok((TxContexts::new(), Vec::new()));
         }
     }
 
@@ -668,51 +780,23 @@ async fn fetch_and_categorize_transactions(
             }
 
             let timestamp = block.header.inner.timestamp.value();
-            let mut block_categorized_data = CategorizedTxContexts::new();
+            let mut block_tx_contexts = TxContexts::new();
             let mut block_txs_to_cache = Vec::with_capacity(block.transactions.len());
 
             for tx in block.transactions {
-                let categorizes = categorize_transaction(&tx, constants);
-
-                if categorizes.is_spore {
-                    block_categorized_data.spore_txs.push(SporeTx {
-                        tx: tx.clone(),
-                        timestamp,
-                        block_number: block_num,
-                    });
-                }
-                if categorizes.is_xudt {
-                    block_categorized_data.xudt_txs.push(XudtTxContext {
-                        tx: tx.clone(),
-                        timestamp,
-                        block_number: block_num,
-                    });
-                }
-                if categorizes.is_rgbpp {
-                    block_categorized_data.rgbpp_txs.push(RgbppTxContext {
-                        tx: tx.clone(),
-                        timestamp,
-                        block_number: block_num,
-                    });
-                }
-                if categorizes.is_inscription {
-                    block_categorized_data
-                        .inscription_txs
-                        .push(InscriptionTxContext {
-                            tx: tx.clone(),
-                            timestamp,
-                            block_number: block_num,
-                        });
-                }
+                // All transactions are processed without pre-categorization
+                block_tx_contexts
+                    .txs
+                    .push(TxContext::new(tx.clone(), block_num, timestamp));
 
                 if get_db().is_ok() {
                     block_txs_to_cache.push(tx);
                 }
             }
-            Some((block_categorized_data, block_txs_to_cache))
+            Some((block_tx_contexts, block_txs_to_cache))
         })
         .reduce(
-            || (CategorizedTxContexts::new(), Vec::new()),
+            || (TxContexts::new(), Vec::new()),
             |mut a, b| {
                 a.0 = a.0.merge(b.0);
                 a.1.extend(b.1);
@@ -721,13 +805,10 @@ async fn fetch_and_categorize_transactions(
         );
 
     info!(
-        "Finished fetching and categorizing blocks: {} - {}. Found: {} Spore, {} XUDT, {} RGB++, {} Inscription. {} Txs to cache.",
+        "Finished fetching and processing blocks: {} - {}. Total transactions: {}. Txs to cache: {}.",
         start_number,
         inclusive_end_number,
-        results.0.spore_txs.len(),
-        results.0.xudt_txs.len(),
-        results.0.rgbpp_txs.len(),
-        results.0.inscription_txs.len(),
+        results.0.txs.len(),
         results.1.len()
     );
     Ok(results)

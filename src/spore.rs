@@ -5,7 +5,6 @@ use rayon::iter::{
     IndexedParallelIterator as _, IntoParallelIterator as _, IntoParallelRefIterator as _,
     ParallelIterator,
 };
-use rayon::slice::ParallelSlice as _;
 
 use sea_orm::ActiveValue::NotSet;
 use sea_orm::{Set, prelude::Json};
@@ -26,51 +25,17 @@ use crate::{
 
 use constants::Constants;
 
-// Struct to hold transaction context
-#[derive(Debug, Clone)] // Add Clone derive
-pub struct SporeTx {
-    pub tx: TransactionView,
-    pub timestamp: u64,
-    pub block_number: u64,
-}
-
-// Main indexer function
-pub fn index_spores(
-    txs: Vec<SporeTx>,
+pub fn try_index_spore(
+    tx: TransactionView,
+    timestamp: u64,
+    block_number: u64,
     network: NetworkType,
     constants: Constants,
     op_sender: mpsc::UnboundedSender<Operations>,
 ) -> Result<(), anyhow::Error> {
-    // Use adaptive parallel processing based on transaction count
-    if txs.len() > 100 {
-        // Process in chunks for better memory locality
-        txs.par_chunks(20).try_for_each(|chunk| {
-            chunk.iter().try_for_each(|ctx| {
-                index_spore(
-                    ctx.tx.clone(),
-                    ctx.timestamp,
-                    ctx.block_number,
-                    network,
-                    op_sender.clone(),
-                    constants,
-                )
-            })
-        })?;
-    } else {
-        // Simple parallel iteration for small batches
-        txs.into_par_iter().try_for_each(|ctx| {
-            index_spore(
-                ctx.tx,
-                ctx.timestamp,
-                ctx.block_number,
-                network,
-                op_sender.clone(),
-                constants,
-            )
-        })?;
-    }
-
-    Ok(())
+    // Try to index as Spore - if it's not a Spore transaction, this will return Ok(())
+    // without doing any database operations
+    index_spore(tx, timestamp, block_number, network, op_sender, constants)
 }
 
 // Internal data structures
@@ -791,7 +756,7 @@ mod tests {
     #[tracing_test::traced_test]
     #[tokio::test]
     async fn debug_index_spore() {
-        use tracing::{debug, info, warn};
+        use tracing::debug;
         let urls = vec![
             "https://mainnet.ckbapp.dev/".to_string(),
             "https://mainnet.ckb.dev/".to_string(),

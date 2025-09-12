@@ -23,12 +23,74 @@ fn to_timestamp_naive(timestamp: u64) -> chrono::NaiveDateTime {
         .naive_utc()
 }
 
+#[allow(dead_code)]
 pub struct RgbppTxContext {
     pub tx: TransactionView,
     pub block_number: u64,
     pub timestamp: u64,
 }
 
+pub fn try_index_rgbpp_transaction(
+    tx: TransactionView,
+    timestamp: u64,
+    block_number: u64,
+    prev_outputs: Option<Vec<CellOutput>>,
+    op_sender: mpsc::UnboundedSender<Operations>,
+) -> Result<(), anyhow::Error> {
+    // Try to index as RGB++ - if it's not an RGB++ transaction, this will return Ok(())
+    // without doing any database operations
+    index_rgbpp_lock_complete(tx, block_number, timestamp, prev_outputs, op_sender)
+}
+
+fn index_rgbpp_lock_complete(
+    tx: TransactionView,
+    block_number: u64,
+    timestamp: u64,
+    prev_outputs: Option<Vec<CellOutput>>,
+    op_sender: mpsc::UnboundedSender<Operations>,
+) -> anyhow::Result<()> {
+    debug!("Indexing RGBPP for tx: {}", tx.hash);
+
+    // Process witnesses synchronously (unlock operations)
+    process_witnesses(&tx, block_number, timestamp, &op_sender)?;
+
+    // Process current outputs synchronously (new lock operations)
+    let current_outputs_with_indices: Vec<(CellOutput, usize)> = tx
+        .inner
+        .outputs
+        .into_iter()
+        .enumerate()
+        .map(|(i, output)| (output, i))
+        .collect();
+    process_current_outputs(
+        &current_outputs_with_indices,
+        block_number,
+        timestamp,
+        &op_sender,
+        &tx.hash,
+    )?;
+
+    // Process previous outputs if available (existing lock operations for unlock verification)
+    if let Some(prev_outputs) = prev_outputs {
+        let prev_outputs_with_indices: Vec<(CellOutput, usize)> = prev_outputs
+            .into_iter()
+            .enumerate()
+            .map(|(i, output)| (output, i))
+            .collect();
+        process_prev_outputs(
+            &prev_outputs_with_indices,
+            block_number,
+            timestamp,
+            &op_sender,
+            &tx.hash,
+        )?;
+    }
+
+    debug!("RGBPP indexing completed for tx: {}", tx.hash);
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub async fn run_rgbpp_indexing_logic(
     tx_contexts: Vec<RgbppTxContext>,
     op_sender: mpsc::UnboundedSender<Operations>,
@@ -86,7 +148,7 @@ fn process_witnesses(
     Ok(())
 }
 
-fn process_outputs(
+fn process_current_outputs(
     outputs: &[(CellOutput, usize)],
     block_number: u64,
     timestamp: u64,
@@ -119,6 +181,40 @@ fn process_outputs(
     Ok(())
 }
 
+fn process_prev_outputs(
+    prev_outputs: &[(CellOutput, usize)],
+    block_number: u64,
+    timestamp: u64,
+    op_sender: &mpsc::UnboundedSender<Operations>,
+    tx_hash: &H256,
+) -> anyhow::Result<()> {
+    let results: Vec<Result<(), anyhow::Error>> = prev_outputs
+        .par_iter()
+        .filter_map(|(output, index)| {
+            rgbpp::RGBPPLockReader::from_slice(output.lock.args.as_bytes())
+                .ok()
+                .map(|reader| (reader.to_entity(), output.lock.clone(), *index))
+        })
+        .map(|(lock, lock_script, index)| {
+            upsert_rgbpp_lock(
+                op_sender.clone(),
+                &lock,
+                tx_hash.clone(),
+                lock_script,
+                index,
+                block_number,
+                timestamp,
+            )
+        })
+        .collect();
+
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 async fn index_rgbpp_lock(
     tx: TransactionView,
     block_number: u64,
@@ -138,7 +234,7 @@ async fn index_rgbpp_lock(
                 .map(|(i, output)| (output, i))
                 .collect();
 
-            process_outputs(
+            process_prev_outputs(
                 &prev_outputs_with_indices,
                 block_number,
                 timestamp,
@@ -161,7 +257,7 @@ async fn index_rgbpp_lock(
         .enumerate()
         .map(|(i, output)| (output, i))
         .collect();
-    process_outputs(
+    process_current_outputs(
         &current_outputs_with_indices,
         block_number,
         timestamp,
