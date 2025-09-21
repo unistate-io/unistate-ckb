@@ -34,6 +34,13 @@ pub enum IndexerType {
     Inscription,
 }
 
+/// Pre-analysis results for transaction processing
+#[derive(Debug, Clone)]
+pub struct TransactionAnalysis {
+    pub spore: spore::SporeAnalysis,
+    pub rgbpp: rgbpp::RgbppAnalysis,
+}
+
 impl IndexerType {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -47,6 +54,25 @@ impl IndexerType {
 
 pub struct TxContexts {
     pub txs: Vec<TxContext>,
+}
+
+/// Analyze transaction to determine processing requirements
+pub fn analyze_transaction(tx: &ckb_jsonrpc_types::TransactionView) -> TransactionAnalysis {
+    // Parallel analysis of Spore and RGB++ components
+    let (spore_analysis, rgbpp_analysis) = rayon::join(
+        || spore::analyze_spore_transaction(tx),
+        || rgbpp::analyze_rgbpp_transaction(tx),
+    );
+
+    TransactionAnalysis {
+        spore: spore_analysis,
+        rgbpp: rgbpp_analysis,
+    }
+}
+
+/// Determine if transaction needs previous outputs pre-fetching
+pub fn needs_prev_outputs_prefetch(analysis: &TransactionAnalysis) -> bool {
+    analysis.spore.has_burn_operations || analysis.rgbpp.has_unlock_operations
 }
 
 impl TxContexts {
@@ -556,43 +582,81 @@ async fn index_all_transactions(
 ) -> Result<(), anyhow::Error> {
     use rayon::prelude::*;
 
-    // Prefetch previous outputs for RGB++ transactions if they have inputs
-    let rgbpp_prev_outputs_futures: Vec<_> = tx_contexts
-        .iter()
-        .filter(|ctx| !ctx.tx.inner.inputs.is_empty())
+    // Phase 1: Parallel analysis of all transactions
+    let analysis_results: std::collections::HashMap<H256, TransactionAnalysis> = tx_contexts
+        .par_iter()
         .map(|ctx| {
-            let inputs = ctx.tx.inner.inputs.clone();
-            let tx_hash = ctx.tx.hash.clone();
-            async move {
-                match get_fetcher()?.get_outputs(inputs).await {
-                    Ok(prev_outputs) => Ok::<Option<(H256, Vec<CellOutput>)>, anyhow::Error>(Some(
-                        (tx_hash, prev_outputs),
-                    )),
-                    Err(e) => {
-                        debug!(
-                            "Failed to fetch previous outputs for tx {}: {:?}",
-                            tx_hash, e
-                        );
-                        Ok(None)
-                    }
-                }
+            let analysis = analyze_transaction(&ctx.tx);
+            (ctx.tx.hash.clone(), analysis)
+        })
+        .collect();
+
+    // Phase 2: Determine which transactions need prev_outputs and fetch them
+    let txs_need_prefetch: Vec<H256> = analysis_results
+        .iter()
+        .filter_map(|(tx_hash, analysis)| {
+            if needs_prev_outputs_prefetch(analysis)
+                && tx_contexts
+                    .iter()
+                    .any(|ctx| ctx.tx.hash == *tx_hash && !ctx.tx.inner.inputs.is_empty())
+            {
+                Some(tx_hash.clone())
+            } else {
+                None
             }
         })
         .collect();
 
-    let rgbpp_prev_outputs_results = try_join_all(rgbpp_prev_outputs_futures).await?;
-    let mut rgbpp_prev_outputs_map = std::collections::HashMap::new();
-    for result in rgbpp_prev_outputs_results {
-        if let Some((tx_hash, prev_outputs)) = result {
-            rgbpp_prev_outputs_map.insert(tx_hash, prev_outputs);
-        }
-    }
+    let prev_outputs_map = if !txs_need_prefetch.is_empty() {
+        let prev_outputs_futures: Vec<_> = txs_need_prefetch
+            .iter()
+            .filter_map(|tx_hash| {
+                tx_contexts
+                    .iter()
+                    .find(|ctx| ctx.tx.hash == *tx_hash)
+                    .map(|ctx| {
+                        let inputs = ctx.tx.inner.inputs.clone();
+                        let tx_hash = ctx.tx.hash.clone();
+                        async move {
+                            match get_fetcher()?.get_outputs(inputs).await {
+                                Ok(prev_outputs) => {
+                                    Ok::<Option<(H256, Vec<CellOutput>)>, anyhow::Error>(Some((
+                                        tx_hash,
+                                        prev_outputs,
+                                    )))
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        "Failed to fetch previous outputs for tx {}: {:?}",
+                                        tx_hash, e
+                                    );
+                                    Ok(None)
+                                }
+                            }
+                        }
+                    })
+            })
+            .collect();
 
-    // Use adaptive parallel processing based on transaction count
+        let prev_outputs_results = try_join_all(prev_outputs_futures).await?;
+        let mut map = std::collections::HashMap::new();
+        for result in prev_outputs_results {
+            if let Some((tx_hash, prev_outputs)) = result {
+                map.insert(tx_hash, prev_outputs);
+            }
+        }
+        map
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Phase 3: Process all transactions with pre-analysis results
     if tx_contexts.len() > 100 {
         // Process in chunks for better memory locality and resource management
         tx_contexts.par_chunks(25).try_for_each(|chunk| {
             chunk.into_par_iter().try_for_each(|ctx| {
+                let analysis = analysis_results.get(&ctx.tx.hash).unwrap();
+                let prev_outputs = prev_outputs_map.get(&ctx.tx.hash).cloned();
                 process_transaction_with_all_indexers(
                     &ctx,
                     network,
@@ -601,13 +665,16 @@ async fn index_all_transactions(
                     &xudt_sender,
                     &rgbpp_sender,
                     &inscription_sender,
-                    &rgbpp_prev_outputs_map,
+                    analysis,
+                    prev_outputs,
                 )
             })
         })
     } else {
         // Simple parallel iteration for small batches
         tx_contexts.into_par_iter().try_for_each(|ctx| {
+            let analysis = analysis_results.get(&ctx.tx.hash).unwrap();
+            let prev_outputs = prev_outputs_map.get(&ctx.tx.hash).cloned();
             process_transaction_with_all_indexers(
                 &ctx,
                 network,
@@ -616,7 +683,8 @@ async fn index_all_transactions(
                 &xudt_sender,
                 &rgbpp_sender,
                 &inscription_sender,
-                &rgbpp_prev_outputs_map,
+                analysis,
+                prev_outputs,
             )
         })
     }
@@ -631,9 +699,20 @@ fn process_transaction_with_all_indexers(
     xudt_sender: &mpsc::UnboundedSender<Operations>,
     rgbpp_sender: &mpsc::UnboundedSender<Operations>,
     inscription_sender: &mpsc::UnboundedSender<Operations>,
-    rgbpp_prev_outputs_map: &std::collections::HashMap<H256, Vec<CellOutput>>,
+    analysis: &TransactionAnalysis,
+    prev_outputs: Option<Vec<CellOutput>>,
 ) -> Result<(), anyhow::Error> {
     let tx_hash = ctx.tx.hash.clone(); // Store hash for logging
+    let tx_hash_hex = hex::encode(&tx_hash);
+
+    tracing::debug!(
+        "Processing transaction {} at block {} with {} inputs, {} outputs, {} witnesses",
+        tx_hash_hex,
+        ctx.block_number,
+        ctx.tx.inner.inputs.len(),
+        ctx.tx.inner.outputs.len(),
+        ctx.tx.inner.witnesses.len()
+    );
 
     // Clone transaction data for parallel processing
     let tx_spore = ctx.tx.clone();
@@ -643,9 +722,6 @@ fn process_transaction_with_all_indexers(
 
     let timestamp = ctx.timestamp;
     let block_number = ctx.block_number;
-
-    // Get pre-fetched previous outputs for RGB++ if available
-    let rgbpp_prev_outputs = rgbpp_prev_outputs_map.get(&tx_hash).cloned();
 
     // Run all four indexers in parallel
     let results: Vec<Result<(), anyhow::Error>> = vec![
@@ -661,9 +737,16 @@ fn process_transaction_with_all_indexers(
     .into_par_iter()
     .map(|(indexer_type, sender, tx)| {
         let result = match indexer_type {
-            IndexerType::Spore => {
-                spore::try_index_spore(tx, timestamp, block_number, network, constants, sender)
-            }
+            IndexerType::Spore => spore::try_index_spore(
+                tx,
+                timestamp,
+                block_number,
+                network,
+                constants,
+                sender,
+                &analysis.spore,
+                prev_outputs.clone(),
+            ),
             IndexerType::Xudt => xudt::try_index_xudt_transaction(
                 tx,
                 timestamp,
@@ -676,8 +759,9 @@ fn process_transaction_with_all_indexers(
                 tx,
                 timestamp,
                 block_number,
-                rgbpp_prev_outputs.clone(),
+                prev_outputs.clone(),
                 sender,
+                &analysis.rgbpp,
             ),
             IndexerType::Inscription => inscription::try_index_inscription_transaction(
                 tx,
@@ -695,18 +779,33 @@ fn process_transaction_with_all_indexers(
                 tx_hash,
                 e
             );
+        } else {
+            debug!(
+                "{} indexer completed for tx {}",
+                indexer_type.as_str(),
+                tx_hash_hex
+            );
         }
         result
     })
     .collect();
 
     // Check if any indexer had a hard error that should stop processing
-    for result in results {
-        // Only fail on critical errors, not "not applicable" results
+    for (i, result) in results.iter().enumerate() {
+        let indexer_name = match i {
+            0 => "Spore",
+            1 => "XUDT",
+            2 => "RGB++",
+            3 => "Inscription",
+            _ => "Unknown",
+        };
         if let Err(e) = result {
             // Most indexers return Ok(()) when transaction doesn't match their type
             // So we only care about actual errors
-            debug!("Indexer error, continuing processing: {:?}", e);
+            debug!(
+                "{} indexer error for tx {}: {:?}",
+                indexer_name, tx_hash_hex, e
+            );
         }
     }
 
